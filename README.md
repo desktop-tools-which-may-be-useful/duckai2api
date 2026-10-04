@@ -65,6 +65,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 `cargo run` 之外的验证由 `tests/`（协议契约、API 契约、wiremock 集成）覆盖，
 全程不访问真实上游网络。
 
+**未实测项（验证边界）如实列在 [UNTESTED.md](UNTESTED.md)**，含 browser 模式成功路径、
+真实上游端到端覆盖、模型目录热刷新、代理池真实多出口四类。
+
 ## 静态 WebUI（§8 方案的覆盖实现）
 
 ARCHITECTURE.md §8 原定 vanilla TypeScript + `tsc --noEmit`。**实现按产品要求覆盖为
