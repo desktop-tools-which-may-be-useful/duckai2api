@@ -1,0 +1,654 @@
+<!doctype html>
+<html lang="en-US"
+      class="react no-js"
+      data-version-tag="serp_20261002_113931_ET"
+      data-version-sha="16077f4eafa643a1d3b77a0392138879174cae48">
+<head>
+    <meta charset="UTF-8">
+    <meta name="color-scheme" content="light dark">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Duck.ai by DuckDuckGo. Private AI chat. Free.</title>
+    <meta name="description" content="Use ChatGPT, Claude, and other AIs, privately. Protect chats from hackers, scammers, and companies. Keep info confidential. Free. No account required." />
+    <meta name="keywords" content="Duck.ai, DuckDuckGo AI, private AI chatbot, free AI chat, anonymous AI chat, AI chat no sign up, OpenAI, Anthropic, Llama, Mistral, open source AI models, privacy focused AI, no account AI chat" />
+    <meta property="og:title" content="Duck.ai">
+    <meta property="og:image" content="/og-image-duckai.png">
+    <meta property="og:description" content="Use ChatGPT, Claude, and other AIs, privately. Protect chats from hackers, scammers, and companies. Keep info confidential. Free. No account required.">
+    <meta property="og:url" content="https://duck.ai/">
+    <meta property="og:site_name" content="Duck.ai">
+
+    <link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="shortcut icon" href="/favicon.ico" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-title" content="Duck.ai" />
+    <link rel="manifest" href="/site.webmanifest" crossorigin="use-credentials" />
+    <link rel="preload" href="/font/DuckSansProduct-Regular.woff2" as="font" type="font/woff2" crossorigin="anonymous" />
+    <link rel="preload" href="/font/DuckSansProduct-Medium.woff2" as="font" type="font/woff2" crossorigin="anonymous" />
+    <link rel="preload" href="/font/DuckSansProduct-Bold.woff2" as="font" type="font/woff2" crossorigin="anonymous" />
+    <link rel="preload" href="/font/DuckSansDisplay-Bold.woff2" as="font" type="font/woff2" crossorigin="anonymous" />
+
+<script>
+try {
+    beforeBody();
+} catch (error) {
+    console.error(error);
+}
+
+function beforeBody() {
+    if (/^\/share\//.test(location.pathname)) {
+        const meta = document.createElement('meta');
+        meta.name = 'robots';
+        meta.content = 'noindex, nofollow';
+        document.head.appendChild(meta);
+    }
+
+    document.documentElement?.classList.remove('no-js');
+    const osDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const native = window.__nativeStorageEntries;
+    const isDesktopElectron = window.navigator?.duckduckgo?.platform === 'electron';
+    const stored = (native && native.setting_kae) || localStorage.setting_kae;
+    const isDark = stored === 'd' || (stored !== '-1' && osDark);
+    document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
+    document.documentElement.dataset.theme = isDark ? 'dark' : 'light';
+
+    if (isDesktopElectron) {
+        document.documentElement.dataset.desktopElectron = '';
+    }
+
+    // Expose the OS so CSS can target OS-specific quirks. Match desktop
+    // Windows while excluding Windows Phone / Mobile.
+    const ua = window.navigator.userAgent;
+    const isWindows = /Windows|Win32|Win64/i.test(ua) && !/windows phone|windows mobile/i.test(ua);
+    if (isWindows) {
+        document.documentElement.dataset.os = 'windows';
+    }
+
+    try {
+        const sidebarCollapsed =
+            (native && native.duckaiSidebarCollapsed) || localStorage.getItem('duckaiSidebarCollapsed');
+        if (sidebarCollapsed === 'true') {
+            document.documentElement.dataset.sidebarCollapsed = '';
+        }
+    } catch (e) {}
+
+    try {
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('native-input') === 'true') {
+            document.documentElement.dataset.hideChatInputPlaceholder = '';
+        }
+    } catch (e) {}
+}
+
+</script>
+<style>
+/* ===== Skeleton loader =====
+ * Mirrors the React app's final geometry so the page doesn't shift on mount.
+ * All values are hardcoded because --sds-* tokens are set by JS at runtime
+ * and are NOT available at first paint.
+ */
+
+@keyframes skeleton-breath {
+    0% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.2;
+    }
+    100% {
+        opacity: 1;
+    }
+}
+
+@font-face {
+    font-family: 'DuckSansProduct';
+    src: url('/font/DuckSansProduct-Bold.woff2') format('woff2'),
+        url('/font/DuckSansProduct-Bold.woff') format('woff'),
+        url('/font/DuckSansProduct-Bold.ttf') format('truetype');
+    font-weight: 530 700;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: 'DuckSansProduct';
+    src: url('/font/DuckSansProduct-Medium.woff2') format('woff2'),
+        url('/font/DuckSansProduct-Medium.woff') format('woff'),
+        url('/font/DuckSansProduct-Medium.ttf') format('truetype');
+    font-weight: 430;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: 'DuckSansProduct';
+    src: url('/font/DuckSansProduct-Regular.woff2') format('woff2'),
+        url('/font/DuckSansProduct-Regular.woff') format('woff'),
+        url('/font/DuckSansProduct-Regular.ttf') format('truetype');
+    font-weight: 300 400;
+    font-style: normal;
+    font-display: swap;
+}
+
+/* Paint the root before the skeleton/bundles load; matches --sk-bg below. */
+html,
+body {
+    background-color: #ffffff;
+}
+
+html[data-theme='dark'],
+html[data-theme='dark'] body {
+    background-color: #161616;
+}
+
+.loader {
+    /* -- Sidebar geometry (from sidebar.module.css) -- */
+    --sk-sidebar-width: 300px;
+    --sk-sidebar-collapsed-width: 57px;
+
+    /* -- Colors: light defaults -- */
+    --sk-bg: #ffffff; /* --ds-surface-primary light */
+    --sk-input-bg: #fafafa; /* --ds-color-gray-0 */
+    --sk-sidebar-border: rgba(0, 0, 0, 0.09); /* border-05 light */
+    --sk-input-border: rgba(0, 0, 0, 0.12); /* --ds-container-tertiary-border-color light */
+    --sk-sidebar-text: rgba(0, 0, 0, 0.36); /* --ds-text-tertiary light */
+    --sk-sidebar-icon-bg: rgba(0, 0, 0, 0.09); /* --ds-container-secondary-border-color light */
+    --sk-action-bg: rgba(0, 0, 0, 0.06); /* button/level-1 light */
+
+    /* -- Layout -- */
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 9999;
+    display: flex;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    padding-right: 4px; /* --ds-space-x01: matches .duckChatLayout padding-right */
+    box-sizing: border-box;
+    background-color: var(--sk-bg);
+    transition: opacity 0.3s ease-out;
+}
+
+.loader.loader-hidden {
+    opacity: 0;
+    pointer-events: none;
+}
+
+/* Small desktop (sidebar.module.css @media --max-gutter-md) */
+@media (max-width: 1079px) {
+    .loader {
+        --sk-sidebar-width: 316px;
+    }
+}
+
+/* Dark theme (from theme-colors.ts dark mappings + color-palette.ts) */
+[data-theme='dark'] .loader {
+    --sk-bg: #161616;
+    --sk-input-bg: rgba(255, 255, 255, 0.09); /* --ds-color-white-at-9 */
+    --sk-sidebar-border: rgba(255, 255, 255, 0.12); /* border-05 dark */
+    --sk-input-border: transparent;
+    --sk-sidebar-text: rgba(255, 255, 255, 0.36); /* --ds-text-tertiary dark */
+    --sk-sidebar-icon-bg: rgba(255, 255, 255, 0.12); /* --ds-container-tertiary-border-color dark */
+    --sk-action-bg: rgba(255, 255, 255, 0.18); /* button/level-1 dark */
+}
+
+/* ===== Sidebar skeleton ===== */
+.sk-sidebar {
+    width: var(--sk-sidebar-width);
+    min-width: var(--sk-sidebar-width);
+    background-color: var(--sk-bg);
+    border-right: 1px solid var(--sk-sidebar-border);
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 8px 6px 0 6px;
+}
+
+[data-sidebar-collapsed] .sk-sidebar {
+    width: var(--sk-sidebar-collapsed-width);
+    min-width: var(--sk-sidebar-collapsed-width);
+}
+ 
+/* If the search input's height changes, this value must follow it.
+ * Mirrored in sidebar.module.css → .contents .sidebarHeader + .headerSwap */
+.sk-sidebar-header {
+    height: 50px;
+    display: flex;
+    align-items: center;
+    padding: 0 2px 4px 8px; /* --ds-space-x_5 right, --ds-space-x01 bottom, --ds-space-x02 left */
+    box-sizing: border-box;
+}
+
+.sk-sidebar-icon {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background-color: var(--sk-sidebar-icon-bg);
+    flex-shrink: 0;
+}
+
+/* Mirrors DSText variant="body-emphasis" (--ds-font-body-md-*) plus the 2px
+ * margin-top from sidebar.module.css → .leftBlock .sidebarHeaderTitle. */
+.sk-sidebar-title {
+    font-family: 'DuckSansProduct', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 14px; /* --ds-font-body-md-size */
+    line-height: 20px; /* --ds-font-body-md-line-height */
+    font-weight: 700; /* --ds-font-weight-bold */
+    letter-spacing: normal; /* --ds-font-letter-spacing-normal */
+    color: var(--sk-sidebar-text);
+    margin-top: 2px;
+    margin-left: 8px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+.sk-sidebar-footer {
+    height: 80px;
+    margin-left: -6px;
+    margin-right: -6px;
+    border-top: 1px solid var(--sk-sidebar-border);
+    box-sizing: border-box;
+}
+
+/* Hide sidebar content when collapsed */
+[data-sidebar-collapsed] .sk-sidebar-header,
+[data-sidebar-collapsed] .sk-sidebar-footer {
+    display: none;
+}
+
+/* No sidebar on mobile */
+@media (max-width: 900px) {
+    .sk-sidebar {
+        display: none;
+    }
+}
+
+/* ===== Main content area (matches .chatRoot) ===== */
+.sk-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+/* Top toolbar spacer (top-toolbar.module.css .root.newChat = 52px) */
+.sk-toolbar {
+    height: 52px;
+    flex-shrink: 0;
+}
+
+/* Chat content area (matches .chatStackContainer, flex: 1) */
+.sk-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+/* Empty state spacer — reserves vertical space so the input stays positioned correctly.
+ * Contains .sk-lockup which mirrors the real DuckAI logo + title lockup geometry. */
+.sk-empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+/* Logo placeholder — mirrors .logo + .lockupTitle space in chat-empty-state.module.css.
+ * height(120) + margin-top(-16) + margin-bottom(24) = 128px contribution to .sk-empty-state,
+ * which matches the real lockup height (logo 120 + title 32 + title margin-top -8 = 128).
+ * If --sds-font-line-height-title-01 changes, revisit the 24px margin-bottom below.
+ * Mirrored in chat-empty-state.module.css → .logo */
+.sk-lockup {
+    width: 120px;
+    height: 120px;
+    margin-top: -16px;
+    margin-bottom: 24px;
+    border-radius: 50%;
+    background-color: var(--sk-action-bg);
+    flex-shrink: 0;
+}
+
+/* ===== Input area — matches .emptyStateContainer positioning ===== */
+.sk-input-area {
+    width: 100%;
+    padding: 0 64px; /* --ds-space-x16 = 64px (--duckai-chat-left/right-padding desktop) */
+    box-sizing: border-box;
+}
+
+/* Desktop: spacer offsets input from top (matches emptyStateContainer layout) */
+@media (min-width: 901px) {
+    .sk-empty-state {
+        margin-top: calc(30vh - 96px); /* emptyStateContainer margin-top */
+        margin-bottom: 24px; /* --ds-space-x06 */
+        /* min-height removed — .sk-lockup now drives the intrinsic height */
+    }
+}
+
+/* Small desktop: titleContainer uses --ds-space-x09 at this breakpoint */
+@media (min-width: 901px) and (max-width: 1079px) {
+    .sk-empty-state {
+        margin-bottom: 36px;
+    }
+}
+
+/* Input container — matches .inputGroup outer box */
+.sk-input {
+    width: 100%;
+    max-width: 640px; /* --duckai-chat-max-width-empty-state */
+    margin: 0 auto;
+    height: 100px; /* --ds-space-x10(40) + --ds-space-x15(60) = 100px */
+    display: flex;
+    padding: 12px; /* --ds-space-x03 */
+    flex-direction: column;
+    justify-content: flex-end;
+    align-items: stretch;
+    gap: 12px; /* --ds-space-x03 */
+    background-color: var(--sk-input-bg);
+    border: 1px solid var(--sk-input-border);
+    border-radius: 24px; /* --ds-radius-x06 */
+    box-sizing: border-box;
+}
+
+/* Top row inside input — takes remaining height */
+.sk-input-top {
+    flex: 1;
+}
+
+.sk-input-pill {
+    width: 30%;
+    height: 100%;
+    margin-top: 4px;
+    border-radius: 9999px; /* --ds-radius-full */
+    background-color: var(--sk-action-bg);
+}
+
+/* Action buttons row inside input */
+.sk-input-actions {
+    height: 32px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    align-self: stretch;
+}
+
+.sk-input-actions-left {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.sk-action-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background-color: var(--sk-action-bg);
+    flex-shrink: 0;
+}
+
+/* Disclaimer spacer — reserves vertical space below the input.
+ * Matches .footerDisclaimer padding + approximate single-line text height. */
+.sk-disclaimer-spacer {
+    width: 100%;
+    max-width: 938px; /* --duckai-chat-max-width */
+    margin: auto;
+    margin-bottom: 0;
+    padding: 8px 56px; /* --ds-space-x02(8) --ds-space-x14(56) */
+    min-height: 13px; /* ≈ one line of label text (12.3px) */
+    box-sizing: border-box;
+}
+
+/* ModeEntryPoints spacer — hidden on desktop (matches mode-entry-points.module.css .container display:none) */
+.sk-entry-points {
+    display: none;
+}
+
+/* Mobile/tablet: input centered vertically (matches emptyStateContainer flex-grow:1 + justify-content:center) */
+@media (max-width: 900px) {
+    .loader {
+        padding-right: 0; /* no layout padding-right on mobile */
+    }
+    .sk-empty-state {
+        /* flex: 1 1 auto so the lockup's intrinsic height participates in
+         * free-space distribution; the default flex: 1 (= 1 1 0%) would treat
+         * .sk-lockup as zero-basis and leave the input position unchanged. */
+        flex: 1 1 auto;
+        justify-content: flex-end; /* keep lockup close to the input during first paint */
+    }
+    .sk-lockup {
+        width: 112px;
+        height: 112px;
+    }
+    .sk-input-area {
+        max-width: 700px; /* --duckai-chat-max-width-mobile (footer max-width) */
+        margin: 0 auto;
+        padding: 0 12px; /* --ds-space-x03 = 12px (--duckai-chat-left/right-padding mobile) */
+    }
+    .sk-input {
+        max-width: none; /* input fills the 700px footer area, not capped at 640px */
+        min-height: 98px; /* mobile: x10(40) + x14(56) + 2px border = 98px */
+    }
+    .sk-entry-points {
+        display: block;
+        margin-top: 16px; /* --ds-space-x04 (matches ModeEntryPoints container margin-top) */
+        height: 26px;
+    }
+    .sk-disclaimer-spacer {
+        flex: 1; /* bottom spacer: balances top spacer to center the input */
+        margin: 0;
+        padding: 0;
+        min-height: 0;
+        max-width: none;
+    }
+}
+
+/* ===== Breathing animation ===== */
+.sk-sidebar-icon,
+.sk-sidebar-title,
+.sk-lockup,
+.sk-input {
+    animation: skeleton-breath 2s ease-in-out infinite;
+}
+
+/* ===== Noscript message styles ===== */
+.noscript-container {
+    width: 100vw;
+    height: 100vh;
+    display: grid;
+    place-content: center;
+    padding: 16px;
+    box-sizing: border-box;
+    text-align: center;
+}
+
+.noscript-text {
+    font-size: 16px;
+    line-height: 1.4;
+    color: #111;
+}
+
+/* Electron: hide sidebar header (behind window controls / traffic lights) */
+[data-desktop-electron] .sk-sidebar-header {
+    visibility: hidden;
+}
+
+/* Electron: make skeleton sidebar draggable (visibility:hidden on header blocks drag, so target parent) */
+[data-desktop-electron] .sk-sidebar {
+    -webkit-app-region: drag;
+}
+
+/* Electron: make skeleton toolbar draggable (mirrors React's electronDragRegion on top-toolbar) */
+[data-desktop-electron] .sk-toolbar {
+    -webkit-app-region: drag;
+}
+
+/* Hide the chat input skeleton when the native app provides its own input
+ * (no web form will mount). Set pre-paint by inline.js so the input area
+ * is never laid out and there's no flash. Targets .sk-input-area so the
+ * input box AND the mobile entry-points strip collapse together; the
+ * surrounding flex spacers keep the layout centered. */
+[data-hide-chat-input-placeholder] .sk-input-area {
+    display: none;
+}
+
+/* Hide loader when JS is disabled */
+.no-js .loader {
+    display: none;
+}
+
+</style>
+<link rel="alternate" hreflang="af-ZA" href="https://duck.ai/?locale=af_ZA">
+<link rel="alternate" hreflang="ar-DZ" href="https://duck.ai/?locale=ar_DZ">
+<link rel="alternate" hreflang="ar-EG" href="https://duck.ai/?locale=ar_EG">
+<link rel="alternate" hreflang="ar-JO" href="https://duck.ai/?locale=ar_JO">
+<link rel="alternate" hreflang="ar-SA" href="https://duck.ai/?locale=ar_SA">
+<link rel="alternate" hreflang="ast-ES" href="https://duck.ai/?locale=ast_ES">
+<link rel="alternate" hreflang="az-AZ" href="https://duck.ai/?locale=az_AZ">
+<link rel="alternate" hreflang="be-BY" href="https://duck.ai/?locale=be_BY">
+<link rel="alternate" hreflang="bg-BG" href="https://duck.ai/?locale=bg_BG">
+<link rel="alternate" hreflang="bn-BD" href="https://duck.ai/?locale=bn_BD">
+<link rel="alternate" hreflang="bn-IN" href="https://duck.ai/?locale=bn_IN">
+<link rel="alternate" hreflang="bo-CN" href="https://duck.ai/?locale=bo_CN">
+<link rel="alternate" hreflang="br-FR" href="https://duck.ai/?locale=br_FR">
+<link rel="alternate" hreflang="bs-BA" href="https://duck.ai/?locale=bs_BA">
+<link rel="alternate" hreflang="ca-ES" href="https://duck.ai/?locale=ca_ES">
+<link rel="alternate" hreflang="cs-CZ" href="https://duck.ai/?locale=cs_CZ">
+<link rel="alternate" hreflang="cy-GB" href="https://duck.ai/?locale=cy_GB">
+<link rel="alternate" hreflang="da-DK" href="https://duck.ai/?locale=da_DK">
+<link rel="alternate" hreflang="de-CH" href="https://duck.ai/?locale=de_CH">
+<link rel="alternate" hreflang="de-DE" href="https://duck.ai/?locale=de_DE">
+<link rel="alternate" hreflang="el-GR" href="https://duck.ai/?locale=el_GR">
+<link rel="alternate" hreflang="en-AU" href="https://duck.ai/?locale=en_AU">
+<link rel="alternate" hreflang="en-CA" href="https://duck.ai/?locale=en_CA">
+<link rel="alternate" hreflang="en-GB" href="https://duck.ai/?locale=en_GB">
+<link rel="alternate" hreflang="en-US" href="https://duck.ai/">
+<link rel="alternate" hreflang="eo-XX" href="https://duck.ai/?locale=eo_XX">
+<link rel="alternate" hreflang="es-AR" href="https://duck.ai/?locale=es_AR">
+<link rel="alternate" hreflang="es-CL" href="https://duck.ai/?locale=es_CL">
+<link rel="alternate" hreflang="es-CO" href="https://duck.ai/?locale=es_CO">
+<link rel="alternate" hreflang="es-CR" href="https://duck.ai/?locale=es_CR">
+<link rel="alternate" hreflang="es-EC" href="https://duck.ai/?locale=es_EC">
+<link rel="alternate" hreflang="es-ES" href="https://duck.ai/?locale=es_ES">
+<link rel="alternate" hreflang="es-MX" href="https://duck.ai/?locale=es_MX">
+<link rel="alternate" hreflang="es-PE" href="https://duck.ai/?locale=es_PE">
+<link rel="alternate" hreflang="es-UY" href="https://duck.ai/?locale=es_UY">
+<link rel="alternate" hreflang="es-VE" href="https://duck.ai/?locale=es_VE">
+<link rel="alternate" hreflang="et-EE" href="https://duck.ai/?locale=et_EE">
+<link rel="alternate" hreflang="eu-ES" href="https://duck.ai/?locale=eu_ES">
+<link rel="alternate" hreflang="fa-IR" href="https://duck.ai/?locale=fa_IR">
+<link rel="alternate" hreflang="fi-FI" href="https://duck.ai/?locale=fi_FI">
+<link rel="alternate" hreflang="fr-BE" href="https://duck.ai/?locale=fr_BE">
+<link rel="alternate" hreflang="fr-CA" href="https://duck.ai/?locale=fr_CA">
+<link rel="alternate" hreflang="fr-CH" href="https://duck.ai/?locale=fr_CH">
+<link rel="alternate" hreflang="fr-FR" href="https://duck.ai/?locale=fr_FR">
+<link rel="alternate" hreflang="ga-IE" href="https://duck.ai/?locale=ga_IE">
+<link rel="alternate" hreflang="gd-GB" href="https://duck.ai/?locale=gd_GB">
+<link rel="alternate" hreflang="gl-ES" href="https://duck.ai/?locale=gl_ES">
+<link rel="alternate" hreflang="gu-IN" href="https://duck.ai/?locale=gu_IN">
+<link rel="alternate" hreflang="he-IL" href="https://duck.ai/?locale=he_IL">
+<link rel="alternate" hreflang="hi-IN" href="https://duck.ai/?locale=hi_IN">
+<link rel="alternate" hreflang="hr-HR" href="https://duck.ai/?locale=hr_HR">
+<link rel="alternate" hreflang="hu-HU" href="https://duck.ai/?locale=hu_HU">
+<link rel="alternate" hreflang="hy-AM" href="https://duck.ai/?locale=hy_AM">
+<link rel="alternate" hreflang="id-ID" href="https://duck.ai/?locale=id_ID">
+<link rel="alternate" hreflang="io-XX" href="https://duck.ai/?locale=io_XX">
+<link rel="alternate" hreflang="is-IS" href="https://duck.ai/?locale=is_IS">
+<link rel="alternate" hreflang="it-IT" href="https://duck.ai/?locale=it_IT">
+<link rel="alternate" hreflang="ja-JP" href="https://duck.ai/?locale=ja_JP">
+<link rel="alternate" hreflang="ka-GE" href="https://duck.ai/?locale=ka_GE">
+<link rel="alternate" hreflang="kab-DZ" href="https://duck.ai/?locale=kab_DZ">
+<link rel="alternate" hreflang="kn-IN" href="https://duck.ai/?locale=kn_IN">
+<link rel="alternate" hreflang="ko-KR" href="https://duck.ai/?locale=ko_KR">
+<link rel="alternate" hreflang="ku" href="https://duck.ai/?locale=ku">
+<link rel="alternate" hreflang="kw-GB" href="https://duck.ai/?locale=kw_GB">
+<link rel="alternate" hreflang="ky-KG" href="https://duck.ai/?locale=ky_KG">
+<link rel="alternate" hreflang="ln-CD" href="https://duck.ai/?locale=ln_CD">
+<link rel="alternate" hreflang="lt-LT" href="https://duck.ai/?locale=lt_LT">
+<link rel="alternate" hreflang="lv-LV" href="https://duck.ai/?locale=lv_LV">
+<link rel="alternate" hreflang="ml-IN" href="https://duck.ai/?locale=ml_IN">
+<link rel="alternate" hreflang="mn-MN" href="https://duck.ai/?locale=mn_MN">
+<link rel="alternate" hreflang="mr-IN" href="https://duck.ai/?locale=mr_IN">
+<link rel="alternate" hreflang="ms-MY" href="https://duck.ai/?locale=ms_MY">
+<link rel="alternate" hreflang="nb-NO" href="https://duck.ai/?locale=nb_NO">
+<link rel="alternate" hreflang="ne-NP" href="https://duck.ai/?locale=ne_NP">
+<link rel="alternate" hreflang="nl-BE" href="https://duck.ai/?locale=nl_BE">
+<link rel="alternate" hreflang="nl-NL" href="https://duck.ai/?locale=nl_NL">
+<link rel="alternate" hreflang="nn-NO" href="https://duck.ai/?locale=nn_NO">
+<link rel="alternate" hreflang="od-IN" href="https://duck.ai/?locale=od_IN">
+<link rel="alternate" hreflang="pl-PL" href="https://duck.ai/?locale=pl_PL">
+<link rel="alternate" hreflang="ps-AF" href="https://duck.ai/?locale=ps_AF">
+<link rel="alternate" hreflang="pt-BR" href="https://duck.ai/?locale=pt_BR">
+<link rel="alternate" hreflang="pt-PT" href="https://duck.ai/?locale=pt_PT">
+<link rel="alternate" hreflang="ro-RO" href="https://duck.ai/?locale=ro_RO">
+<link rel="alternate" hreflang="ru-RU" href="https://duck.ai/?locale=ru_RU">
+<link rel="alternate" hreflang="sc-IT" href="https://duck.ai/?locale=sc_IT">
+<link rel="alternate" hreflang="si-LK" href="https://duck.ai/?locale=si_LK">
+<link rel="alternate" hreflang="sk-SK" href="https://duck.ai/?locale=sk_SK">
+<link rel="alternate" hreflang="sl-SI" href="https://duck.ai/?locale=sl_SI">
+<link rel="alternate" hreflang="sq-AL" href="https://duck.ai/?locale=sq_AL">
+<link rel="alternate" hreflang="sr-RS" href="https://duck.ai/?locale=sr_RS">
+<link rel="alternate" hreflang="sv-SE" href="https://duck.ai/?locale=sv_SE">
+<link rel="alternate" hreflang="ta-IN" href="https://duck.ai/?locale=ta_IN">
+<link rel="alternate" hreflang="te-IN" href="https://duck.ai/?locale=te_IN">
+<link rel="alternate" hreflang="th-TH" href="https://duck.ai/?locale=th_TH">
+<link rel="alternate" hreflang="tl-PH" href="https://duck.ai/?locale=tl_PH">
+<link rel="alternate" hreflang="tokipona-XX" href="https://duck.ai/?locale=tokipona_XX">
+<link rel="alternate" hreflang="tpi-PG" href="https://duck.ai/?locale=tpi_PG">
+<link rel="alternate" hreflang="tr-TR" href="https://duck.ai/?locale=tr_TR">
+<link rel="alternate" hreflang="uk-UA" href="https://duck.ai/?locale=uk_UA">
+<link rel="alternate" hreflang="ur-PK" href="https://duck.ai/?locale=ur_PK">
+<link rel="alternate" hreflang="vi-VN" href="https://duck.ai/?locale=vi_VN">
+<link rel="alternate" hreflang="zh-CN" href="https://duck.ai/?locale=zh_CN">
+<link rel="alternate" hreflang="zh-TW" href="https://duck.ai/?locale=zh_TW">
+<link rel="alternate" hreflang="x-default" href="https://duck.ai/">
+<link rel="canonical" href="https://duck.ai/">
+    <link rel="stylesheet" href="/dist/duckai-dist/entry.duckai.a5606233a2a345343a48.css" />
+</head>
+<body>
+    <noscript>
+        <div class="noscript-container">
+            <p class="noscript-text">Duck.ai requires JavaScript to run</p>
+            <p class="noscript-text">Visit <a href="https://duckduckgo.com">duckduckgo.com</a></p>
+        </div>
+    </noscript>
+    <div id="app-loader" class="loader">
+        <div class="sk-sidebar">
+            <div class="sk-sidebar-header">
+                <div class="sk-sidebar-icon"></div>
+                <span class="sk-sidebar-title">Duck.ai</span>
+            </div>
+            <div class="sk-sidebar-footer"></div>
+        </div>
+        <div class="sk-main">
+            <div class="sk-toolbar"></div>
+            <div class="sk-content">
+                <div class="sk-empty-state">
+                    <div class="sk-lockup"></div>
+                </div>
+                <div class="sk-input-area">
+                    <div class="sk-input">
+                        <div class="sk-input-top">
+                            <div class="sk-input-pill"></div>
+                        </div>
+                        <div class="sk-input-actions">
+                            <div class="sk-input-actions-left">
+                                <div class="sk-action-btn"></div>
+                                <div class="sk-action-btn"></div>
+                            </div>
+                            <div class="sk-action-btn"></div>
+                        </div>
+                    </div>
+                    <div class="sk-entry-points"></div>
+                </div>
+                <div class="sk-disclaimer-spacer"></div>
+            </div>
+        </div>
+    </div>
+    <div id="app"></div>
+    <script src="/dist/duckai-dist/lib.91d392df195d4371dfcff8dd.js"></script>
+    <script src="/dist/locale/en_US.770eefbe82c1aaa67c5057ba9d6d3f3a.js"></script>
+    <script src="/dist/duckai-dist/entry.vendors.11499ddb7ff74f7177ee.js"></script>
+    <script src="/dist/duckai-dist/entry.duckai.7eaf8f9b262254b03739.js"></script>
+</body>
+</html>

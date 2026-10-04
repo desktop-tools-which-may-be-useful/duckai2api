@@ -1,0 +1,37 @@
+[package]
+name = "duckai-upstream"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Upstream access: UpstreamClient trait, http/browser adapters, egress state machine, proxy pool"
+
+[dependencies]
+duckai-types = { workspace = true }
+duckai-protocol = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+bytes = { workspace = true }
+eventsource-stream = { workspace = true }
+chromiumoxide = { workspace = true, optional = true }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+
+[features]
+default = ["http"]
+# 纯 HTTP 适配器（默认主路径，reqwest）
+http = []
+# 可选浏览器适配器（chromiumoxide 驱动系统 Chrome）
+browser = ["dep:chromiumoxide"]
+# 测试工具（MockUpstream 等，供 duckai-api 契约测试）
+testutil = []

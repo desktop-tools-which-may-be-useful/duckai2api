@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>duckai2api-rust 控制台</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github-dark.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+  <script src="https://unpkg.com/axios@1.11.0/dist/axios.min.js"></script>
+  <style>
+    body { font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; }
+    .nav-btn { padding: .3rem .7rem; border-radius: .5rem; color: #94a3b8; cursor: pointer; }
+    .nav-btn:hover { color: #e2e8f0; background: #1e293b; }
+    .nav-btn.active { background: #1d4ed8; color: #fff; }
+    .card { background: #0f172a; border: 1px solid #1e293b; border-radius: .75rem; padding: 1rem; }
+    .tbl { width: 100%; border-collapse: collapse; font-size: .85rem; }
+    .tbl th { text-align: left; color: #64748b; font-weight: 500; padding: .5rem .6rem; border-bottom: 1px solid #1e293b; }
+    .tbl td { padding: .5rem .6rem; border-bottom: 1px solid #172033; }
+    .tbl tr:hover td { background: #111c33; }
+    .btn { padding: .3rem .7rem; border-radius: .5rem; font-size: .8rem; background: #1e293b; color: #cbd5e1; cursor: pointer; }
+    .btn:hover { background: #334155; }
+    .btn-primary { background: #1d4ed8; color: #fff; }
+    .btn-primary:hover { background: #2563eb; }
+    .btn-danger { background: #7f1d1d; color: #fecaca; }
+    .btn-danger:hover { background: #991b1b; }
+    .inp { background: #0b1220; border: 1px solid #334155; border-radius: .5rem; padding: .45rem .7rem; color: #e2e8f0; font-size: .85rem; }
+    .inp:focus { outline: 1px solid #3b82f6; }
+    pre code { border-radius: .5rem; padding: .9rem !important; font-size: .8rem; line-height: 1.5; }
+    .badge { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .72rem; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-200 min-h-screen">
+  <header class="border-b border-slate-800 bg-slate-900/80 sticky top-0 z-10 backdrop-blur">
+    <div class="max-w-6xl mx-auto px-4 py-3 flex items-center gap-3 flex-wrap">
+      <div class="font-bold text-lg">🦆 duckai2api-rust</div>
+      <div class="text-xs text-slate-500 hidden md:block">Duck.ai → OpenAI / Anthropic / Responses 中继</div>
+      <nav class="ml-auto flex gap-1 text-sm flex-wrap" id="nav">
+        <button data-page="dashboard" class="nav-btn active">概览</button>
+        <button data-page="models" class="nav-btn">模型</button>
+        <button data-page="egress" class="nav-btn">出口</button>
+        <button data-page="logs" class="nav-btn">日志</button>
+        <button data-page="settings" class="nav-btn">设置</button>
+        <button data-page="api" class="nav-btn">API 示例</button>
+        <button id="logout-btn" class="nav-btn hidden">退出登录</button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="max-w-6xl mx-auto px-4 py-6 space-y-6">
+    <!-- 概览 -->
+    <section id="page-dashboard" class="page">
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div class="card"><div class="text-xs text-slate-500">服务状态</div><div id="h-status" class="text-xl font-bold mt-1">—</div></div>
+        <div class="card"><div class="text-xs text-slate-500">上游模式</div><div id="h-mode" class="text-xl font-bold mt-1">—</div></div>
+        <div class="card"><div class="text-xs text-slate-500">VQD 有效</div><div id="h-vqd" class="text-xl font-bold mt-1">—</div></div>
+        <div class="card"><div class="text-xs text-slate-500">在途请求</div><div id="h-inflight" class="text-xl font-bold mt-1">—</div></div>
+        <div class="card"><div class="text-xs text-slate-500">出口健康 / 总数</div><div id="h-egress" class="text-xl font-bold mt-1">—</div></div>
+        <div class="card"><div class="text-xs text-slate-500">封禁出口</div><div id="h-banned" class="text-xl font-bold mt-1">—</div></div>
+        <div class="card"><div class="text-xs text-slate-500">fe-version 年龄（秒）</div><div id="h-fe" class="text-xl font-bold mt-1">—</div></div>
+        <div class="card"><div class="text-xs text-slate-500">默认模型</div><div id="h-model" class="text-xl font-bold mt-1 truncate" title="">—</div></div>
+      </div>
+    </section>
+
+    <!-- 模型 -->
+    <section id="page-models" class="page hidden">
+      <div class="card">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="font-semibold">可用模型</h2>
+          <button class="btn" id="models-refresh">刷新</button>
+        </div>
+        <table class="tbl">
+          <thead><tr><th>模型 ID</th><th>上游归属</th><th>别名</th><th>操作</th></tr></thead>
+          <tbody id="models-body"><tr><td colspan="4" class="text-slate-500">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 出口 -->
+    <section id="page-egress" class="page hidden">
+      <div class="card">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="font-semibold">出口池（直连 / 代理）</h2>
+          <div class="flex gap-2">
+            <button class="btn" id="probe-btn">全量探测</button>
+            <button class="btn" id="egress-refresh">刷新</button>
+          </div>
+        </div>
+        <table class="tbl">
+          <thead><tr><th>#</th><th>标签</th><th>状态</th><th>健康分</th><th>在途</th><th>原因</th><th>迁移时间</th><th>操作</th></tr></thead>
+          <tbody id="egress-body"><tr><td colspan="8" class="text-slate-500">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 日志 -->
+    <section id="page-logs" class="page hidden">
+      <div class="card">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="font-semibold">最近请求日志</h2>
+          <div class="flex gap-2 items-center">
+            <select id="logs-lines" class="inp"><option>50</option><option selected>200</option><option>500</option></select>
+            <button class="btn" id="logs-refresh">刷新</button>
+          </div>
+        </div>
+        <table class="tbl">
+          <thead><tr><th>时间</th><th>协议</th><th>模型</th><th>耗时</th><th>状态</th><th>重试</th><th>错误</th></tr></thead>
+          <tbody id="logs-body"><tr><td colspan="7" class="text-slate-500">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 设置 -->
+    <section id="page-settings" class="page hidden">
+      <div class="grid md:grid-cols-2 gap-4">
+        <div class="card">
+          <h2 class="font-semibold mb-3">运行参数</h2>
+          <label class="text-xs text-slate-500">默认模型</label>
+          <select id="set-model" class="inp w-full mb-3"><option>（加载中…）</option></select>
+          <label class="text-xs text-slate-500">全局并发上限（超限 429）</label>
+          <input id="set-concurrency" type="number" min="1" class="inp w-full mb-3" />
+          <div class="text-xs text-slate-500 mb-1">监听地址 / 鉴权状态</div>
+          <div id="set-meta" class="text-sm text-slate-300 mb-3">—</div>
+          <button class="btn btn-primary" id="set-save">保存设置</button>
+        </div>
+        <div class="card">
+          <h2 class="font-semibold mb-3">代理池（脱敏显示）</h2>
+          <div class="flex gap-2 mb-3">
+            <input id="proxy-input" placeholder="socks5://host:port 或 http://host:port" class="inp flex-1" />
+            <button class="btn btn-primary" id="proxy-add">添加</button>
+          </div>
+          <ul id="proxy-list" class="space-y-2 text-sm"></ul>
+          <div class="text-xs text-slate-400 mt-3">也可用环境变量 <code class="text-amber-300">DUCKAI_PROXIES</code>（逗号分隔）与遗留 <code class="text-amber-300">DUCKAI_PROXY</code>。</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- API 示例 -->
+    <section id="page-api" class="page hidden">
+      <div class="card mb-4">
+        <div class="flex flex-wrap gap-3 items-end">
+          <div>
+            <label class="text-xs text-slate-500 block mb-1">模型选择</label>
+            <select id="api-model" class="inp"><option>（加载中…）</option></select>
+          </div>
+          <div>
+            <label class="text-xs text-slate-500 block mb-1">Bearer 密钥（留空=未启用鉴权）</label>
+            <input id="api-key" class="inp" placeholder="sk-…" />
+          </div>
+          <div class="flex gap-2" id="proto-tabs">
+            <button class="btn active-tab" data-proto="openai">OpenAI /v1/chat/completions</button>
+            <button class="btn" data-proto="anthropic">Anthropic /v1/messages</button>
+            <button class="btn" data-proto="responses">Responses /v1/responses</button>
+          </div>
+        </div>
+      </div>
+      <div class="grid md:grid-cols-2 gap-4">
+        <div class="card">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="font-semibold text-sm">请求示例 · 非流式</h3>
+            <button class="btn btn-primary" id="send-test">发送测试请求</button>
+          </div>
+          <pre><code id="ex-plain" class="language-bash"></code></pre>
+        </div>
+        <div class="card">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="font-semibold text-sm">请求示例 · SSE 流式</h3>
+            <span class="text-xs text-slate-500">curl -N</span>
+          </div>
+          <pre><code id="ex-stream" class="language-bash"></code></pre>
+        </div>
+      </div>
+      <div class="card mt-4">
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="font-semibold text-sm">测试响应</h3>
+          <span id="test-status" class="text-xs text-slate-500"></span>
+        </div>
+        <pre><code id="ex-result" class="language-json">// 点击「发送测试请求」后显示结果</code></pre>
+      </div>
+    </section>
+  </main>
+
+  <!-- 登录浮层 -->
+  <div id="login-overlay" class="fixed inset-0 bg-black/70 z-30 hidden items-center justify-center">
+    <div class="card w-80">
+      <h3 class="font-semibold mb-2">管理登录</h3>
+      <p class="text-xs text-slate-400 mb-3">服务设置了 DUCKAI_ADMIN_PASSWORD，请输入口令。</p>
+      <input id="login-pass" type="password" class="inp w-full mb-3" placeholder="管理口令" />
+      <button id="login-btn" class="btn btn-primary w-full">登录</button>
+      <div id="login-err" class="text-xs text-red-400 mt-2 hidden"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="fixed bottom-4 right-4 px-4 py-2 rounded-lg text-sm shadow-lg hidden"></div>
+
+  <script src="/ui/app.js"></script>
+</body>
+</html>

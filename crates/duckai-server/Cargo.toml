@@ -1,0 +1,42 @@
+[package]
+name = "duckai-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Assembly binary: config, wiring, bind validation"
+
+[[bin]]
+name = "duckai2api"
+path = "src/main.rs"
+
+[dependencies]
+duckai-types = { workspace = true }
+duckai-protocol = { workspace = true }
+duckai-upstream = { workspace = true, default-features = false }
+duckai-api = { workspace = true }
+duckai-webui = { workspace = true, optional = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+duckai-upstream = { workspace = true, default-features = false, features = ["testutil", "http"] }
+wiremock = { workspace = true }
+tower = { workspace = true }
+http-body-util = { workspace = true }
+
+[features]
+default = ["webui", "http"]
+# 嵌入静态 WebUI；关闭时仅 API
+webui = ["dep:duckai-webui"]
+# 纯 HTTP 适配器（默认主路径）
+http = ["duckai-upstream/http"]
+# 可选浏览器适配器
+browser = ["duckai-upstream/browser"]

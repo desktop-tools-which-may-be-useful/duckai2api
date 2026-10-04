@@ -1,0 +1,27 @@
+[package]
+name = "duckai-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Duck.ai protocol layer: challenge solving, payload/headers, SSE parsing, flattening, tool routing (no I/O dispatch)"
+
+[dependencies]
+duckai-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+# rsa 0.9 的 rand_core 0.6 CryptoRng 约束需要 rand 0.8 的 OsRng（rand 0.9 不兼容）
+rand08 = { package = "rand", version = "0.8" }
+rsa = { workspace = true }
+rquickjs = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+default = []
+browser = []

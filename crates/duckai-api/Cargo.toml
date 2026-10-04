@@ -1,0 +1,31 @@
+[package]
+name = "duckai-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Axum API layer: OpenAI/Anthropic/Responses endpoints, auth, SSE output"
+
+[dependencies]
+duckai-types = { workspace = true }
+duckai-upstream = { workspace = true, default-features = false }
+duckai-protocol = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+duckai-upstream = { workspace = true, default-features = false, features = ["testutil"] }
+tower = { workspace = true }
+http-body-util = { workspace = true }
+tokio-stream = { workspace = true }
+
+[features]
+default = []
+browser = []
