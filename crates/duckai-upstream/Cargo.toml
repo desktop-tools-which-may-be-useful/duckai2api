@@ -35,3 +35,7 @@ http = []
 browser = ["dep:chromiumoxide"]
 # 测试工具（MockUpstream 等，供 duckai-api 契约测试）
 testutil = []
+
+[[example]]
+name = "natural_flow"
+required-features = ["browser"]

@@ -23,12 +23,11 @@ use std::time::{Duration, Instant};
 use chromiumoxide::Browser;
 use futures::StreamExt;
 use futures::stream;
-use rand::Rng;
 use tokio::sync::Mutex;
 
 use duckai_protocol::home::{fallback_fe_meta, parse_home, stack_for_bundle};
-use duckai_protocol::pow::{PowEngine, PowEnv, RquickjsPow};
-use duckai_protocol::{FeMeta, VqdStore, fe_signals, journey_id};
+use duckai_protocol::pow::{PowEngine, PowEnv, RquickjsPow, align_duration};
+use duckai_protocol::{FeMeta, VqdStore, fe_signals_browser, journey_id};
 use duckai_types::{EgressScope, ModelInfo, UpstreamError, UpstreamEvent};
 
 use crate::cooldown::now_ms;
@@ -62,14 +61,41 @@ const FE_FALLBACK_TTL: Duration = Duration::from_secs(60);
 
 /// 页内取挑战脚本：`GET /duckchat/v1/status`（与页面同源、同 UA、同 TLS 指纹，
 /// 响应头 `x-vqd-hash-1` 即服务端挑战；不可读头时回传 status/error）。
+/// 请求头与真实页面 `Te` 状态函数对齐：`Cache-Control: no-store` 防缓存复读，
+/// `x-ddg-journey-id` 为本次状态交互的旅程号（真实页会随请求发送）。
+/// 真实页在状态前先打 `auth/token` + `capabilities` 前奏（自然流程抓包 22:21Z：
+/// 两者均 200、无 Set-Cookie，失败不阻塞），同源 GET 保真对齐上游日志序列。
 const STATUS_SCRIPT: &str = r#"
-async (url) => {
+async ([url, journey]) => {
+  const hex16 = () => {
+    const a = new Uint8Array(16);
+    crypto.getRandomValues(a);
+    return Array.from(a, (x) => x.toString(16).padStart(2, '0')).join('');
+  };
+  const pre = (path) => fetch(url.replace(/\/duckchat\/v1\/status$/, path), {
+    method: 'GET',
+    headers: { 'x-ddg-journey-id': hex16(), 'Cache-Control': 'no-store' },
+  }).then((r) => r.status).catch(() => 0);
   try {
-    const r = await fetch(url, { method: 'GET', headers: { 'x-vqd-accept': '1' } });
+    await pre('/duckchat/v1/auth/token');
+    await pre('/duckchat/v1/capabilities');
+  } catch (e) {}
+  try {
+    const r = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'x-vqd-accept': '1',
+        'Cache-Control': 'no-store',
+        'x-ddg-journey-id': journey,
+      },
+    });
+    let body = '';
+    try { body = (await r.text()).slice(0, 400); } catch (e) {}
     return {
       status: r.status,
       vqd: r.headers.get('x-vqd-hash-1'),
       retry_after: r.headers.get('retry-after'),
+      body,
     };
   } catch (err) {
     return { status: 0, error: String(err) };
@@ -98,9 +124,18 @@ const CHAT_SCRIPT: &str = r#"
           credentials: 'include',
         });
         if (!resp.ok && resp.status !== 200) {
-          out.error = { kind: 'http', status: resp.status };
+          let b = '';
+          try { b = (await resp.text()).slice(0, 2000); } catch (e) {}
+          out.error = {
+            kind: 'http',
+            status: resp.status,
+            body: b,
+            next_challenge: resp.headers.get('x-vqd-hash-1'),
+            retry_after: resp.headers.get('retry-after'),
+          };
           return out;
         }
+        out.next_challenge = resp.headers.get('x-vqd-hash-1');
         const reader = resp.body.getReader();
         const dec = new TextDecoder();
         let buf = '';
@@ -166,8 +201,8 @@ impl PageSession {
         // location.origin：PoW meta.origin 与取挑战 URL 都以页面实际源为准
         let origin = url_of(page).await?;
         let meta = self.fe_meta(page).await;
-        let vqd = match self.vqd.token(now_ms()) {
-            Some(token) => token,
+        let (vqd, source) = match self.vqd.token(now_ms()) {
+            Some(token) => (token, "cache"),
             None => {
                 let challenge = self.challenge_via_page(page, &origin).await?;
                 // PoW 环境与真实页同构：UA 必须是被驱动浏览器的真实 UA
@@ -177,10 +212,27 @@ impl PageSession {
                     origin: origin.clone(),
                     stack: stack_for_bundle(&meta.bundle_hash),
                 };
+                tracing::info!(ua = %env.user_agent, "browser: PoW 环境 UA");
+                // 遥测：验证 `disable-blink-features=AutomationControlled` 真正生效
+                //（chromiumoxide 默认会带 --enable-automation，关闭前 navigator.webdriver=true）
+                if let Some(wd) = page
+                    .evaluate("!!navigator.webdriver")
+                    .await
+                    .ok()
+                    .and_then(|h| h.into_value::<bool>().ok())
+                {
+                    tracing::info!(webdriver = wd, "browser: 指纹探针");
+                }
                 match self.pow.solve(&challenge, &env) {
                     Ok(solution) => {
-                        self.vqd.store(solution.payload_b64.clone(), now_ms());
-                        solution.payload_b64
+                        tracing::info!(
+                            vqd_len = solution.payload_b64.len(),
+                            duration_ms = solution.duration_ms,
+                            "browser: PoW 求解成功"
+                        );
+                        let payload = align_duration(&solution.payload_b64);
+                        self.vqd.store(payload.clone(), now_ms());
+                        (payload, "challenge")
                     }
                     Err(err) => {
                         tracing::warn!(%err, "browser: vqd PoW 求解失败");
@@ -191,13 +243,19 @@ impl PageSession {
             }
         };
         let start = now_ms();
-        let elapsed = 60 + rand::rng().random_range(0..120u64);
-        Ok(dyn_headers_json(
+        let headers = dyn_headers_json(
             vqd,
             &meta.fe_version,
-            &fe_signals(start, elapsed),
+            &fe_signals_browser(start),
             &journey_id(),
-        ))
+        );
+        tracing::info!(
+            vqd_source = source,
+            fe_version = %meta.fe_version,
+            bundle = %meta.bundle_hash,
+            "browser: 动态头就绪"
+        );
+        Ok(headers)
     }
 
     /// 页内取挑战：`GET {origin}/duckchat/v1/status`（同源 fetch，保真）。
@@ -207,7 +265,9 @@ impl PageSession {
         origin: &str,
     ) -> Result<String, UpstreamError> {
         let url = format!("{origin}/duckchat/v1/status");
-        let arg = serde_json::to_string(&url).unwrap_or_else(|_| "\"/duckchat/v1/status\"".into());
+        let arg = serde_json::to_string(&(&url, journey_id())).unwrap_or_else(|_| {
+            "\"/duckchat/v1/status\",\"00000000000000000000000000000000\"".into()
+        });
         let raw: serde_json::Value = page
             .evaluate(format!("({STATUS_SCRIPT})({arg})"))
             .await
@@ -230,7 +290,14 @@ impl PageSession {
             .await
             .ok()
             .and_then(|handle| handle.into_value::<String>().ok());
+        let parsed_ok = html.as_deref().and_then(parse_home).is_some();
         let (meta, ttl) = fe_from_html(html.as_deref());
+        tracing::info!(
+            parsed_ok,
+            fe_version = %meta.fe_version,
+            bundle = %meta.bundle_hash,
+            "browser: 页面元数据（DOM）"
+        );
         self.fe = Some(FeCache {
             meta: meta.clone(),
             at: Instant::now(),
@@ -258,6 +325,7 @@ fn dyn_headers_json(
 /// 页内取挑战结果 → 挑战串或错误（映射与 HTTP 主路径 §5.4 一致）。
 fn challenge_from_status(res: &serde_json::Value) -> Result<String, UpstreamError> {
     let status = res.get("status").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+    let body = res.get("body").and_then(|v| v.as_str()).unwrap_or("");
     match status {
         200..=299 => res
             .get("vqd")
@@ -266,10 +334,14 @@ fn challenge_from_status(res: &serde_json::Value) -> Result<String, UpstreamErro
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .ok_or(UpstreamError::ChallengeFailed),
-        418 => Err(UpstreamError::Banned {
-            scope: EgressScope::Direct,
-        }),
+        418 => {
+            tracing::warn!(%status, %body, "browser: 取挑战（/status）被上游按限制拒绝");
+            Err(UpstreamError::Banned {
+                scope: EgressScope::Direct,
+            })
+        }
         429 => {
+            tracing::warn!(%status, %body, "browser: 取挑战被上游限流");
             let retry_after = res
                 .get("retry_after")
                 .and_then(|v| v.as_str())
@@ -283,7 +355,10 @@ fn challenge_from_status(res: &serde_json::Value) -> Result<String, UpstreamErro
                 .unwrap_or("页内取挑战失败")
                 .to_string(),
         )),
-        _ => Err(UpstreamError::ChallengeFailed),
+        _ => {
+            tracing::warn!(%status, %body, "browser: 取挑战返回异常状态");
+            Err(UpstreamError::ChallengeFailed)
+        }
     }
 }
 
@@ -350,8 +425,16 @@ async fn launch_chrome(cfg: &BrowserConfig) -> Result<Browser, UpstreamError> {
     use chromiumoxide::BrowserConfig as ChromiumConfig;
     let mut builder = ChromiumConfig::builder()
         .with_head()
-        .arg("--disable-blink-features=AutomationControlled")
-        .arg("--no-first-run");
+        // 注意：chromiumoxide 的 `.arg()` 会给参数补 `--` 前缀，这里必须只传
+        // 参数本体（带 `--` 会被拼成 `----xxx` 而遭 Chrome 静默忽略）。
+        .arg("disable-blink-features=AutomationControlled")
+        .arg("no-first-run");
+    // UA 固定为线上实测被接受的 152（http 主路径同款）：`--user-agent` 同时覆盖
+    // wire 请求头与 navigator.userAgent，PoW ch0=SHA256(UA) 与聊天头保持一致。
+    builder = builder.arg(format!(
+        "user-agent={}",
+        duckai_protocol::headers::USER_AGENT
+    ));
     if let Some(path) = cfg.chrome_path.as_deref().filter(|p| !p.is_empty()) {
         builder = builder.chrome_executable(path);
     }
@@ -489,6 +572,13 @@ async fn chat_via_page(
     // 错误归类
     if let Some(error) = raw.get("error").filter(|v| !v.is_null()) {
         let status = error.get("status").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+        let detail = error
+            .get("body")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| error.get("message").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        tracing::warn!(%status, detail, "browser: 页内 chat 出错");
         let err = match status {
             418 => UpstreamError::Banned {
                 scope: duckai_types::EgressScope::Direct,
@@ -497,19 +587,17 @@ async fn chat_via_page(
             400 => UpstreamError::ChallengeFailed,
             s if s >= 400 => UpstreamError::Upstream {
                 status: s,
-                body: error
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("browser chat failed")
-                    .to_string(),
+                body: if detail.is_empty() {
+                    "browser chat failed".to_string()
+                } else {
+                    detail.to_string()
+                },
             },
-            _ => UpstreamError::Transport(
-                error
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("browser chat exception")
-                    .to_string(),
-            ),
+            _ => UpstreamError::Transport(if detail.is_empty() {
+                "browser chat exception".to_string()
+            } else {
+                detail.to_string()
+            }),
         };
         return Ok(PageChat {
             frames: Vec::new(),

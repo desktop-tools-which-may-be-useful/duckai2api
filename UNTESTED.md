@@ -13,13 +13,16 @@
     注入动态头 → 页内 fetch SSE → 回放」全链路，`/v1/chat/completions` 返回 200 + PONG；
   - **wire 头与真实抓包对照**：`accept: text/event-stream`、`priority: u=1, i`、
     `x-vqd-hash-1`（PoW 产物 `client_hashes[0]` 与真实抓包同值）、`x-fe-version`、
-    `x-fe-signals`、`x-ddg-journey-id` 程序化 diff 全部在场（唯一差异为 sec-ch-ua
-    品牌串：抓包用 Chromium、测试驱动真 Chrome，均属合法真实浏览器值）；
-  - 418→`ERR_BN_LIMIT` 分类路径、`DUCKAI_CHROME_PATH` 指定真 Chrome 151 的运行时行为。
-- **未测**：经 browser 上游对**真实 duck.ai** 拿到 200 成功响应（仅差一次已知良好出口的单发）。
-- **原因**：实现修复后的真实单发落在新出口（东京机房 IP，AS49304 SAKURA）上仍 418——
-  `status` 端点同出口 200、wire 头已与真实抓包逐项对照一致，归因指向出口 IP 信誉
-  而非实现；需切回曾 200 的直连住宅线路补一次单发确认。
+    `x-fe-signals`、`x-ddg-journey-id` 程序化 diff 全部在场；
+  - 418→`ERR_CHALLENGE` 分类路径、`DUCKAI_CHROME_PATH` 指定真 Chrome 151 的运行时行为；
+  - **真实 duck.ai 成功单发（2026-10-04 22:41Z，机房出口）**：`/v1/chat/completions`
+    返回 200 + `content:"ok"`——此前多次 418（`ERR_CHALLENGE`）的根因已定位并修复：
+    Chrome 形态请求被服务端严格校验，需与真实页面同构的遥测表
+    （`x-fe-signals` 用 onboarding→`startNewChat_free` 5 事件表而非 `recentChats*` 表）、
+    求解载荷 `meta.duration` 落在浏览器观测区间（8–20ms，本地产物 ~0ms 对浏览器形态
+    不符）、以及 `auth/token`+`capabilities` 前奏（对齐真实页序列）。修复后单发即 200，
+    证明出口 IP 不是因素（同出口同分钟 http 模式一直 200）。
+- **未测**：browser 模式的真实长时 SSE 多 chunk 流式；多出口/代理下 browser 模式的连续稳定性。
 - **相关已知观察**：chromiumoxide 0.9.1 与 Chrome 151 存在 CDP 协议漂移 WARN
   （`WS Invalid message: data did not match any variant`），不影响启动与请求链路。
 

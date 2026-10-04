@@ -33,7 +33,9 @@ pub use flatten::{
     FlattenError, Flattened, flatten_anthropic, flatten_conversation, flatten_openai,
     flatten_responses,
 };
-pub use headers::{build_chat_headers, build_status_headers, fe_signals, journey_id};
+pub use headers::{
+    build_chat_headers, build_status_headers, fe_signals, fe_signals_browser, journey_id,
+};
 pub use home::{DEFAULT_ENTRY_BUNDLE_HASH, DEFAULT_FE_VERSION, FeMeta, parse_home};
 pub use pow::{PowEngine, PowEnv, PowError, PowSolution, RquickjsPow};
 pub use sse::{SseParser, UpstreamFrame};

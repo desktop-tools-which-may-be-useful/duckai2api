@@ -41,6 +41,43 @@ pub fn fe_signals(start_ms: u64, elapsed_ms: u64) -> String {
     base64::engine::general_purpose::STANDARD.encode(payload.to_string().as_bytes())
 }
 
+/// 浏览器形态 chat 的 `x-fe-signals`：onboarding→startNewChat_free 事件表。
+///
+/// 与两次**已证实成功**的 chat 请求（duck.ai.har entry[11] 20:36Z、自然流程 22:21Z）
+/// 的表结构一致：`onboarding_impression` → `action(trusted)` → `onboarding_impression`
+/// → `onboarding_finish` → `startNewChat_free`，事件 delta 单调递增、`end` 收尾于
+/// 最后事件之后。HTTP 主路径继续用 [`fe_signals`]（已线上验证 200）；本表只服务
+/// 浏览器模式——服务端对 Chrome 形态请求校验遥测表名，`recentChats*` 两张表不同源。
+pub fn fe_signals_browser(start_ms: u64) -> String {
+    const EVENTS: [(&str, u32, u32); 5] = [
+        ("onboarding_impression", 80, 130),
+        ("action", 900, 1_100),
+        ("onboarding_impression", 9_500, 10_500),
+        ("onboarding_finish", 11_900, 12_300),
+        ("startNewChat_free", 12_350, 12_700),
+    ];
+    let mut last = 0u32;
+    let events: Vec<serde_json::Value> = EVENTS
+        .iter()
+        .map(|(name, lo, hi)| {
+            let delta = rand::rng().random_range(*lo..=*hi).max(last + 1);
+            last = delta;
+            if *name == "action" {
+                serde_json::json!({ "name": name, "delta": delta, "trusted": true })
+            } else {
+                serde_json::json!({ "name": name, "delta": delta })
+            }
+        })
+        .collect();
+    let end = last + rand::rng().random_range(1..=3u32);
+    let payload = serde_json::json!({
+        "start": start_ms,
+        "events": events,
+        "end": end,
+    });
+    base64::engine::general_purpose::STANDARD.encode(payload.to_string().as_bytes())
+}
+
 /// 状态探测（`GET /`）请求头——origin/referer/accept-language 必带（线上验证必需）。
 pub fn build_status_headers(origin: &str) -> Vec<(String, String)> {
     vec![
@@ -128,6 +165,39 @@ mod tests {
         assert_eq!(events[0]["name"], "recentChatsImpression");
         let delta = events[0]["delta"].as_u64().unwrap();
         assert!((40..=60).contains(&delta), "delta {delta} out of range");
+    }
+
+    #[test]
+    fn signals_browser_matches_proven_onboarding_table() {
+        let b64 = fe_signals_browser(1_791_146_183_838);
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(&b64)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(v["start"], 1_791_146_183_838u64);
+        let events = v["events"].as_array().unwrap();
+        assert_eq!(events.len(), 5);
+        let names: Vec<&str> = events.iter().map(|e| e["name"].as_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            [
+                "onboarding_impression",
+                "action",
+                "onboarding_impression",
+                "onboarding_finish",
+                "startNewChat_free"
+            ]
+        );
+        assert_eq!(events[1]["trusted"], true);
+        // delta 单调递增，end 收尾于最后事件之后（与 HAR entry[11] 同构）
+        let mut prev = 0u64;
+        for e in events {
+            let d = e["delta"].as_u64().unwrap();
+            assert!(d > prev, "deltas must increase: {d} <= {prev}");
+            prev = d;
+        }
+        let end = v["end"].as_u64().unwrap();
+        assert!(end > prev, "end {end} must exceed last delta {prev}");
     }
 
     #[test]

@@ -11,6 +11,7 @@
 //! 且已用**真实线上挑战**端到端验证（本仓库 fixtures/challenge_fresh.b64 可重放）。
 
 use base64::Engine as _;
+use rand::Rng as _;
 
 pub mod rquickjs_engine;
 
@@ -90,6 +91,37 @@ pub fn sha256_base64(input: &str) -> String {
     b64_encode(&digest)
 }
 
+/// 浏览器形态求解载荷的 `meta.duration` 对齐。
+///
+/// 线上两次成功 chat 的 duration 分别为 16ms（duck.ai.har）与 12ms（自然流程），
+/// 都是真实浏览器页内求解耗时；本地 QuickJS 求解 ~0–1ms 直接上报与 Chrome 形态
+/// 不符（服务端对 Chrome 形态请求做严格校验，见浏览器模式 418 根因分析）。
+/// 本函数把 `meta.duration` 改写为 8–20ms 的观测区间（不触碰任何哈希字段：
+/// duration 不参与 `client_hashes` 计算，载荷无签名）。解析失败原样返回。
+pub fn align_duration(payload_b64: &str) -> String {
+    let Ok(raw) = b64_decode(payload_b64) else {
+        return payload_b64.to_string();
+    };
+    let Ok(mut val) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+        return payload_b64.to_string();
+    };
+    let ms = 8 + rand::rng().random_range(0..=12u32);
+    let patched = match val.get_mut("meta") {
+        Some(serde_json::Value::Object(meta)) => {
+            meta.insert("duration".into(), serde_json::json!(ms.to_string()));
+            true
+        }
+        _ => false,
+    };
+    if !patched {
+        return payload_b64.to_string();
+    }
+    match serde_json::to_vec(&val) {
+        Ok(out) => b64_encode(&out),
+        Err(_) => payload_b64.to_string(),
+    }
+}
+
 /// 挑战求解失败时的 JS `c()` 回退串（vqd.go / 桌面端同款格式）。
 ///
 /// 该串**不是**一个合法 token；按 §5.4 链路，求解失败应转入 override → browser → 503，
@@ -138,6 +170,22 @@ mod tests {
             decoded,
             "CHALLENGE::challenge execution timed out::Error\nat l::https://duck.ai"
         );
+    }
+
+    #[test]
+    fn align_duration_patches_meta_only() {
+        let payload = r#"{"server_hashes":["a"],"client_hashes":["b","c","d"],"signals":{},"meta":{"v":"4","challenge_id":"x","timestamp":"1","debug":"CD","origin":"https://duck.ai","stack":"Error\nat l","duration":"0"}}"#;
+        let b64 = b64_encode(payload.as_bytes());
+        let out = align_duration(&b64);
+        assert_ne!(out, b64, "应改写 duration");
+        let v: serde_json::Value = serde_json::from_slice(&b64_decode(&out).unwrap()).unwrap();
+        let ms: u32 = v["meta"]["duration"].as_str().unwrap().parse().unwrap();
+        assert!((8..=20).contains(&ms), "duration {ms} 不在 8-20ms 观测区间");
+        // 其余字段不动
+        assert_eq!(v["meta"]["debug"], "CD");
+        assert_eq!(v["client_hashes"], serde_json::json!(["b", "c", "d"]));
+        // 非法输入原样返回
+        assert_eq!(align_duration("not-base64-json"), "not-base64-json");
     }
 
     /// 线上挑战黄金重放（fixtures/challenge_fresh.b64，真实捕获）：
@@ -220,6 +268,25 @@ mod tests {
         let payload2: Value = serde_json::from_str(&decoded2).unwrap();
         assert_eq!(payload2["client_hashes"][0], hashes[0]);
         assert_eq!(payload2["meta"]["stack"], meta["stack"]);
+    }
+
+    /// 诊断（`#[ignore]`）：解一次真实线上 challenge，输出方案供离线比对。
+    /// 用法：`LIVE_CHALLENGE=$(cat live.b64) LIVE_UA='...' cargo test -p duckai-protocol diag_solve_live -- --ignored --nocapture`
+    #[test]
+    #[ignore = "live diagnostic; needs LIVE_CHALLENGE + LIVE_UA"]
+    fn diag_solve_live() {
+        let challenge = std::env::var("LIVE_CHALLENGE").expect("LIVE_CHALLENGE");
+        let ua = std::env::var("LIVE_UA").expect("LIVE_UA");
+        let env = PowEnv {
+            user_agent: ua,
+            origin: "https://duck.ai".into(),
+            stack: crate::home::stack_for_bundle(crate::home::DEFAULT_ENTRY_BUNDLE_HASH),
+        };
+        let sol = RquickjsPow
+            .solve(challenge.trim(), &env)
+            .expect("solve live challenge");
+        println!("SOL_B64={}", sol.payload_b64);
+        println!("CHALLENGE_ID={:?}", sol.challenge_id);
     }
 
     /// 原始 JSON 文本键序断言：server_hashes → signals → client_hashes → meta。
