@@ -6,14 +6,22 @@
 
 ## 1. browser 模式的成功响应路径
 
-- **已测**：`--features browser` 的编译、`clippy -D warnings`、`cargo test --no-run`；
-  release+browser 构建启动后 `/health` 返回 `mode=browser`，chromiumoxide 成功建立 CDP WebSocket（t3 实测）。
-- **未测**：经 browser 上游拿到成功响应（HTTP 200 / SSE 数据流）。
-- **原因**：验证期间本机出口被上游封禁（`ERR_BN_LIMIT`，503 + `retry-after: 300`），成功路径无法触发。
-- **连带未测**：`DUCKAI_CHROME_PATH` 指定自定义 Chrome 的运行时行为。
-- **相关已知观察**：chromiumoxide 0.9.1 与本机 Chrome 151/152 存在 CDP 协议漂移 WARN
-  （`WS Invalid message: data did not match any variant`），不影响启动与请求链路，
-  但在成功路径未实测的前提下，browser 模式对新版 Chrome 的兼容性仍待确认。
+- **已测**：
+  - `--features browser` 的编译、`clippy -D warnings`、`cargo test`（含动态头回归测试）；
+  - **本地零上游端到端**：指向本地 mock（首页含 `data-version-tag`/`entry.duckai.*` 属性、
+    `status` 返回可解挑战 fixture），browser 模式完成「页内取挑战 → 本地 rquickjs PoW →
+    注入动态头 → 页内 fetch SSE → 回放」全链路，`/v1/chat/completions` 返回 200 + PONG；
+  - **wire 头与真实抓包对照**：`accept: text/event-stream`、`priority: u=1, i`、
+    `x-vqd-hash-1`（PoW 产物 `client_hashes[0]` 与真实抓包同值）、`x-fe-version`、
+    `x-fe-signals`、`x-ddg-journey-id` 程序化 diff 全部在场（唯一差异为 sec-ch-ua
+    品牌串：抓包用 Chromium、测试驱动真 Chrome，均属合法真实浏览器值）；
+  - 418→`ERR_BN_LIMIT` 分类路径、`DUCKAI_CHROME_PATH` 指定真 Chrome 151 的运行时行为。
+- **未测**：经 browser 上游对**真实 duck.ai** 拿到 200 成功响应（仅差一次已知良好出口的单发）。
+- **原因**：实现修复后的真实单发落在新出口（东京机房 IP，AS49304 SAKURA）上仍 418——
+  `status` 端点同出口 200、wire 头已与真实抓包逐项对照一致，归因指向出口 IP 信誉
+  而非实现；需切回曾 200 的直连住宅线路补一次单发确认。
+- **相关已知观察**：chromiumoxide 0.9.1 与 Chrome 151 存在 CDP 协议漂移 WARN
+  （`WS Invalid message: data did not match any variant`），不影响启动与请求链路。
 
 ## 2. 真实上游的端到端覆盖不完整（http 模式）
 
