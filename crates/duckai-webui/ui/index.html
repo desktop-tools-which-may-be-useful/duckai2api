@@ -39,6 +39,7 @@
         <button data-page="dashboard" class="nav-btn active">概览</button>
         <button data-page="models" class="nav-btn">模型</button>
         <button data-page="egress" class="nav-btn">出口</button>
+        <button data-page="keys" class="nav-btn">密钥</button>
         <button data-page="logs" class="nav-btn">日志</button>
         <button data-page="settings" class="nav-btn">设置</button>
         <button data-page="api" class="nav-btn">API 示例</button>
@@ -79,17 +80,60 @@
     <!-- 出口 -->
     <section id="page-egress" class="page hidden">
       <div class="card">
-        <div class="flex items-center justify-between mb-3">
-          <h2 class="font-semibold">出口池（直连 / 代理）</h2>
+        <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+          <h2 class="font-semibold">出口池（直连 / 代理 · 每出口独立策略）</h2>
           <div class="flex gap-2">
+            <button class="btn" id="direct-toggle">直连：—</button>
             <button class="btn" id="probe-btn">全量探测</button>
             <button class="btn" id="egress-refresh">刷新</button>
           </div>
         </div>
-        <table class="tbl">
-          <thead><tr><th>#</th><th>标签</th><th>状态</th><th>健康分</th><th>在途</th><th>原因</th><th>迁移时间</th><th>操作</th></tr></thead>
-          <tbody id="egress-body"><tr><td colspan="8" class="text-slate-500">加载中…</td></tr></tbody>
-        </table>
+        <div class="overflow-x-auto">
+          <table class="tbl">
+            <thead><tr>
+              <th>#</th><th>出口（原因 / 迁移）</th><th>启用</th><th>状态</th><th>分/途</th>
+              <th>自动冷却</th><th>首封(s)</th><th>上限(s)</th><th>429起始(s)</th><th>操作</th>
+            </tr></thead>
+            <tbody id="egress-body"><tr><td colspan="10" class="text-slate-500">加载中…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="text-xs text-slate-500 mt-3">
+          「自动冷却」关闭后该出口失败只扣健康分、不进入封禁/冷却（手动封禁仍生效）。
+          策略按槽位写入 sqlite，重启后保留；勾选改动后需点该行「保存」。
+        </div>
+      </div>
+    </section>
+
+    <!-- 密钥 -->
+    <section id="page-keys" class="page hidden">
+      <div class="grid md:grid-cols-3 gap-4">
+        <div class="card md:col-span-2">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="font-semibold">API 密钥（开放接口 Bearer）</h2>
+            <button class="btn" id="keys-refresh">刷新</button>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="tbl">
+              <thead><tr><th>#</th><th>标签</th><th>前缀</th><th>创建</th><th>状态</th><th>操作</th></tr></thead>
+              <tbody id="keys-body"><tr><td colspan="6" class="text-slate-500">加载中…</td></tr></tbody>
+            </table>
+          </div>
+          <div class="text-xs text-slate-500 mt-3">
+            库中只存 SHA-256 摘要 + 前 12 位前缀，明文创建时展示一次。
+            环境引导值 <code class="text-amber-300">DUCKAI_DEFAULT_API_KEY</code> 仅在空表时导入一次；删除全部密钥将关闭接口鉴权。
+          </div>
+        </div>
+        <div class="card">
+          <h2 class="font-semibold mb-3">创建密钥</h2>
+          <label class="text-xs text-slate-500">备注标签（谁在用）</label>
+          <input id="key-label" class="inp w-full mb-3" placeholder="如：CI / 本地客户端" />
+          <button class="btn btn-primary w-full" id="key-create">创建</button>
+          <div id="key-once" class="hidden mt-3">
+            <div class="text-xs text-amber-400 mb-1">⚠ 一次性明文，关闭页面后无法再查看：</div>
+            <code id="key-once-val" class="block break-all bg-slate-900 rounded p-2 text-xs text-emerald-300 select-all"></code>
+            <button class="btn mt-2" id="key-copy">复制</button>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -130,7 +174,30 @@
             <button class="btn btn-primary" id="proxy-add">添加</button>
           </div>
           <ul id="proxy-list" class="space-y-2 text-sm"></ul>
-          <div class="text-xs text-slate-400 mt-3">也可用环境变量 <code class="text-amber-300">DUCKAI_PROXIES</code>（逗号分隔）与遗留 <code class="text-amber-300">DUCKAI_PROXY</code>。</div>
+          <div class="text-xs text-slate-400 mt-3">也可用环境变量 <code class="text-amber-300">DUCKAI_PROXIES</code>（逗号分隔，<code class="text-amber-300">direct</code> 关键字表示显式直连）。首次启动后以库内出口表为准。</div>
+        </div>
+      </div>
+      <div class="grid md:grid-cols-2 gap-4">
+        <div class="card">
+          <h2 class="font-semibold mb-3">存储设置（写入 sqlite）</h2>
+          <label class="text-xs text-slate-500">上游 BASE（http(s)://…，留空=内置默认）</label>
+          <input id="set-base" class="inp w-full mb-3" placeholder="https://…" />
+          <label class="text-xs text-slate-500">VQD 覆盖（留空=自动获取挑战值）</label>
+          <input id="set-vqd" class="inp w-full mb-3" placeholder="vqd_hash_1…" />
+          <label class="flex items-center gap-2 text-sm mb-3">
+            <input id="set-newchat" type="checkbox" class="accent-blue-600" /> 新会话模式（每次请求独立开新会话）
+          </label>
+          <button class="btn btn-primary" id="set-save2">保存存储设置</button>
+          <div id="set-save-note" class="text-xs text-slate-500 mt-2"></div>
+        </div>
+        <div class="card">
+          <h2 class="font-semibold mb-3">管理口令</h2>
+          <label class="text-xs text-slate-500">旧口令（从未设置过则留空）</label>
+          <input id="pw-old" type="password" class="inp w-full mb-3" autocomplete="current-password" />
+          <label class="text-xs text-slate-500">新口令（≥ 8 位，argon2id 入库）</label>
+          <input id="pw-new" type="password" class="inp w-full mb-3" autocomplete="new-password" placeholder="至少 8 位" />
+          <button class="btn btn-primary" id="pw-save">修改口令</button>
+          <div class="text-xs text-slate-500 mt-2">库内口令优先于环境默认值；修改后旧口令立即失效，当前会话保持登录。</div>
         </div>
       </div>
     </section>
@@ -184,7 +251,7 @@
   <div id="login-overlay" class="fixed inset-0 bg-black/70 z-30 hidden items-center justify-center">
     <div class="card w-80">
       <h3 class="font-semibold mb-2">管理登录</h3>
-      <p class="text-xs text-slate-400 mb-3">服务设置了 DUCKAI_ADMIN_PASSWORD，请输入口令。</p>
+      <p class="text-xs text-slate-400 mb-3">请输入管理口令（库内自定义口令优先，其次为环境默认值）。</p>
       <input id="login-pass" type="password" class="inp w-full mb-3" placeholder="管理口令" />
       <button id="login-btn" class="btn btn-primary w-full">登录</button>
       <div id="login-err" class="text-xs text-red-400 mt-2 hidden"></div>

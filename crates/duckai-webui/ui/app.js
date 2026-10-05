@@ -51,6 +51,7 @@ function goto(page) {
   location.hash = page;
   if (page === "logs") loadLogs();
   if (page === "dashboard") loadStatus();
+  if (page === "keys") loadKeys();
 }
 
 $("#nav").addEventListener("click", (e) => {
@@ -125,7 +126,7 @@ function renderEgress(rows) {
   const body = $("#egress-body");
   body.innerHTML = "";
   if (!rows.length) {
-    body.innerHTML = "<tr><td colspan='8' class='text-slate-500'>（无出口记录）</td></tr>";
+    body.innerHTML = "<tr><td colspan='10' class='text-slate-500'>（无出口记录）</td></tr>";
     return;
   }
   rows.forEach((r) => {
@@ -135,25 +136,72 @@ function renderEgress(rows) {
       : r.state === "Banned" ? "text-red-400"
       : r.state === "Cooldown" ? "text-amber-400"
       : "text-sky-400";
+    const sub =
+      "<div class='text-xs text-slate-500'>" + esc(r.reason || "—") +
+      " · " + new Date(r.since_ms).toLocaleTimeString() + "</div>";
     tr.innerHTML =
       "<td>" + r.index + "</td>" +
-      "<td class='font-mono'>" + esc(r.label) + "</td>" +
+      "<td class='font-mono'>" + esc(r.label) + sub + "</td>" +
+      "<td><input type='checkbox' data-en='" + r.index + "' class='accent-blue-600' title='启用出口（参与分发/探测）'" +
+        (r.enabled ? " checked" : "") + "></td>" +
       "<td class='" + color + "'>" + esc(r.state) + "</td>" +
-      "<td>" + r.score + "</td>" +
-      "<td>" + r.inflight + "</td>" +
-      "<td class='text-slate-400'>" + esc(r.reason || "—") + "</td>" +
-      "<td class='text-slate-500'>" + new Date(r.since_ms).toLocaleTimeString() + "</td>" +
-      "<td class='space-x-1'>" +
+      "<td>" + r.score + "/" + r.inflight + "</td>" +
+      "<td><input type='checkbox' data-cd='" + r.index + "' class='accent-blue-600' title='失败自动冷却开关'" +
+        (r.cooldown_enabled ? " checked" : "") + "></td>" +
+      "<td><input type='number' min='1' data-f='ban_secs' data-i='" + r.index + "' value='" + r.ban_secs + "' class='inp w-16 px-1 py-0.5' title='首次封禁秒数'></td>" +
+      "<td><input type='number' min='1' data-f='ban_cap_secs' data-i='" + r.index + "' value='" + r.ban_cap_secs + "' class='inp w-16 px-1 py-0.5' title='封禁秒数上限'></td>" +
+      "<td><input type='number' min='1' data-f='rate_limit_secs' data-i='" + r.index + "' value='" + r.rate_limit_secs + "' class='inp w-16 px-1 py-0.5' title='429 无 Retry-After 的起始退避'></td>" +
+      "<td class='space-x-1 whitespace-nowrap'>" +
+        "<button class='btn btn-primary' data-savep='" + r.index + "'>保存</button> " +
         "<button class='btn btn-danger' data-ban='" + r.index + "'>封禁</button> " +
         "<button class='btn' data-unban='" + r.index + "'>解封</button>" +
       "</td>";
     body.appendChild(tr);
   });
+  renderDirectToggle(rows);
 }
+
+function renderDirectToggle(rows) {
+  const d = rows.find((r) => r.direct);
+  const btn = $("#direct-toggle");
+  btn._enabled = !!(d && d.enabled);
+  btn.textContent = !d
+    ? "直连：未配置（点击添加）"
+    : d.enabled
+      ? "直连：已启用（点击停用）"
+      : "直连：已停用（点击启用）";
+}
+
+$("#direct-toggle").addEventListener("click", async () => {
+  const enabled = !$("#direct-toggle")._enabled;
+  try {
+    const { data } = await api.post("/egress/direct", { enabled });
+    toast(enabled ? "直连出口已启用" : "直连出口已停用");
+    renderEgress(data.egresses);
+  } catch (_) {}
+});
 
 $("#egress-body").addEventListener("click", async (e) => {
   const d = e.target.dataset || {};
   try {
+    if (d.savep !== undefined) {
+      const tr = e.target.closest("tr");
+      const num = (f) => Number(tr.querySelector("[data-f='" + f + "']").value);
+      const policy = {
+        enabled: tr.querySelector("[data-en]").checked,
+        cooldown_enabled: tr.querySelector("[data-cd]").checked,
+        ban_secs: num("ban_secs"),
+        ban_cap_secs: num("ban_cap_secs"),
+        rate_limit_secs: num("rate_limit_secs"),
+      };
+      const { data } = await api.post("/egress/policy", {
+        index: Number(d.savep),
+        policy,
+      });
+      toast("出口 #" + d.savep + " 策略已保存");
+      renderEgress(data.egresses);
+      return;
+    }
     if (d.ban !== undefined) {
       await api.post("/egress/ban", { index: Number(d.ban) });
       toast("已手动封禁出口 #" + d.ban);
@@ -178,6 +226,70 @@ $("#egress-refresh").addEventListener("click", async () => {
     renderEgress(data.egresses);
   } catch (_) {}
 });
+
+// ------------------------------------------------------------------ 密钥
+async function loadKeys() {
+  try {
+    const { data } = await api.get("/keys");
+    renderKeys(data.keys);
+  } catch (_) {}
+}
+
+function renderKeys(keys) {
+  const body = $("#keys-body");
+  body.innerHTML = "";
+  if (!keys.length) {
+    body.innerHTML = "<tr><td colspan='6' class='text-slate-500'>（无密钥，接口鉴权未启用）</td></tr>";
+    return;
+  }
+  keys.forEach((k) => {
+    const revoked = !!k.revoked_at;
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      "<td>" + k.id + "</td>" +
+      "<td>" + esc(k.label || "—") + "</td>" +
+      "<td class='font-mono'>" + esc(k.prefix) + "…</td>" +
+      "<td class='text-slate-500'>" + new Date(k.created_at * 1000).toLocaleString() + "</td>" +
+      "<td class='" + (revoked ? "text-red-400" : "text-emerald-400") + "'>" +
+        (revoked ? "已吊销" : "有效") + "</td>" +
+      "<td>" + (revoked ? "—" :
+        "<button class='btn btn-danger' data-revoke-key='" + k.id + "'>吊销</button>") + "</td>";
+    body.appendChild(tr);
+  });
+}
+
+$("#keys-body").addEventListener("click", async (e) => {
+  const id = e.target.dataset && e.target.dataset.revokeKey;
+  if (id === undefined) return;
+  try {
+    const { data } = await api.delete("/keys/" + encodeURIComponent(id));
+    renderKeys(data.keys);
+    toast("密钥 #" + id + " 已吊销");
+  } catch (_) {}
+});
+
+$("#key-create").addEventListener("click", async () => {
+  const label = $("#key-label").value.trim();
+  try {
+    const { data } = await api.post("/keys", { label: label || null });
+    $("#key-label").value = "";
+    $("#key-once-val").textContent = data.key;
+    $("#key-once").classList.remove("hidden");
+    renderKeys(data.keys);
+    toast("密钥已创建，明文仅此一次可见");
+  } catch (_) {}
+});
+
+$("#key-copy").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText($("#key-once-val").textContent);
+    toast("已复制到剪贴板");
+  } catch (_) {
+    toast("复制失败，请手动选择", false);
+  }
+});
+
+$("#keys-refresh").addEventListener("click", loadKeys);
 
 // ------------------------------------------------------------------ 日志
 async function loadLogs() {
@@ -214,6 +326,9 @@ function renderSettings(s) {
   STATE.settings = s;
   if (s.default_model) $("#set-model").value = s.default_model;
   $("#set-concurrency").value = s.max_concurrency;
+  $("#set-base").value = s.base || "";
+  $("#set-vqd").value = s.vqd_override || "";
+  $("#set-newchat").checked = !!s.new_chat;
   $("#set-meta").textContent =
     s.bind + "  ·  API 鉴权" + (s.auth_enabled ? "已启用" : "未启用") +
     "  ·  管理口令" + (s.admin_password_set ? "已设置" : "未设置（只读）") +
@@ -268,6 +383,34 @@ $("#proxy-list").addEventListener("click", async (e) => {
     const { data } = await api.delete("/proxy", { params: { url: u } });
     renderProxies(data.proxies);
     toast("代理已删除");
+  } catch (_) {}
+});
+
+$("#set-save2").addEventListener("click", async () => {
+  try {
+    const { data } = await api.post("/settings/save", {
+      base: $("#set-base").value.trim(),
+      vqd_override: $("#set-vqd").value.trim(),
+      new_chat: $("#set-newchat").checked,
+    });
+    renderSettings(data.settings);
+    $("#set-save-note").textContent = data.note;
+    toast("存储设置已保存");
+  } catch (_) {}
+});
+
+$("#pw-save").addEventListener("click", async () => {
+  const nw = $("#pw-new").value;
+  if (nw.length < 8) return toast("新口令至少 8 位", false);
+  try {
+    const { data } = await api.post("/password", {
+      old: $("#pw-old").value,
+      new: nw,
+    });
+    $("#pw-old").value = "";
+    $("#pw-new").value = "";
+    renderSettings(data.settings);
+    toast("管理口令已修改，旧口令立即失效");
   } catch (_) {}
 });
 
@@ -467,7 +610,8 @@ function esc(s) {
 
 async function boot() {
   const page = (location.hash || "#dashboard").slice(1);
-  goto(["dashboard", "models", "egress", "logs", "settings", "api"].includes(page) ? page : "dashboard");
+  const pages = ["dashboard", "models", "egress", "keys", "logs", "settings", "api"];
+  goto(pages.includes(page) ? page : "dashboard");
   await loadStatus();
   renderExamples();
   setInterval(() => {

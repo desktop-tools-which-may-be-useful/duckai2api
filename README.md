@@ -25,30 +25,47 @@ duckai-server     装配：.env/环境变量 → 工厂 → 路由拼装 → 监
 ## 快速开始
 
 ```bash
-cp .env.example .env        # 14 个键，代码中全部有真实消费点
-cargo run --release         # 默认 http://127.0.0.1:8080
+cp .env.example .env        # env 只保留引导值；密钥/口令/出口配置入 sqlite
+cargo run --release         # 默认 http://127.0.0.1:8080（自动创建 data/duckai.db）
 ```
 
 - 对外 API：`POST /v1/chat/completions`、`POST /v1/messages`、`POST /v1/responses`
-  （SSE `stream:true` 与非流式均支持；`GET /v1/models`；设了 `DUCKAI_API_KEY` 则需 `Authorization: Bearer …`）
+  （SSE `stream:true` 与非流式均支持；`GET /v1/models`；设了 `DUCKAI_DEFAULT_API_KEY`
+  则需 `Authorization: Bearer …`）
 - 免鉴权健康检查：`GET /health`
-- 控制台：浏览器打开 `http://127.0.0.1:8080/`（设置 `DUCKAI_ADMIN_PASSWORD` 后登录获得写权限；
+- 控制台：浏览器打开 `http://127.0.0.1:8080/`（设置管理口令后登录获得写权限；
   不设则回环只读、写操作 403）
+
+## 配置存储（env 引导 + sqlite 生效值）
+
+原则：**env 只做引导，不落敏感值；生效配置与密钥入 sqlite**（rusqlite bundled，
+`DUCKAI_DB_PATH` 默认 `data/duckai.db`，权限 0600，测试用 `:memory:`）。
+
+| 存储 | 内容 | 引导规则 |
+| --- | --- | --- |
+| `settings` | base / vqd_override / new_chat / default_model / max_concurrency | 表空时从 env 播种一次，此后 **DB 覆盖 env** |
+| `api_keys` | SHA-256 摘要 + 前 12 位前缀 + 标签 + 吊销位（**不存明文**） | 表空时导入一次 env 默认 key；明文仅创建时回显一次 |
+| `passwords` | 管理口令 argon2id PHC（`set_custom`，最短 8 位） | 库内口令优先；env 默认口令为常数时间校验回落 |
+| `egress` | 每出口一行：url（NULL=直连）/ 启用 / 冷却开关 / 首封·上限·429 起始秒数 / 排序 | 表空时按 `DUCKAI_PROXIES` 播种（`direct` 关键字 → 直连行），**重启后出口表是池的唯一来源** |
+
+数据库不存的东西（如实说明）：运行期封禁状态（重启清零，管理面手动封禁兜底）、
+Bearer 会话、请求日志。
 
 ## 配置（`.env.example` 全键消费对照）
 
 | 键 | 默认 | 消费点 |
 | --- | --- | --- |
-| `DUCKAI_BASE` | `https://duck.ai` | 上游工厂 → HTTP 适配器所有端点拼接 |
+| `DUCKAI_BASE` | `https://duck.ai` | 上游工厂 → HTTP 适配器所有端点拼接（空表时播种进 settings） |
 | `DUCKAI_UPSTREAM` | `auto` | `UpstreamMode::parse` 选适配器（auto=有 http 用 http） |
-| `DUCKAI_VQD_OVERRIDE` | 空 | 挑战求解退化链第 2 级注入（10 分钟 TTL） |
+| `DUCKAI_VQD_OVERRIDE` | 空 | 挑战求解退化链第 2 级注入（10 分钟 TTL；空表播种进 settings） |
 | `DUCKAI_MODEL` | `gpt-5.6-luna` | `ApiState` 默认模型（管理面可热改，写锁实时生效） |
-| `DUCKAI_NEW_CHAT` | `false` | 会话粘性开关（true=每次新会话），进工厂配置并在管理面回显 |
-| `DUCKAI_PROXIES` / `DUCKAI_PROXY` | 空 | 合并去重校验 → 出口池（传输层真实生效，非死配置） |
-| `DUCKAI_API_KEY` | 空 | Bearer 鉴权；空 + 非回环绑定 → **启动即拒绝**（fail-fast） |
+| `DUCKAI_NEW_CHAT` | `false` | 会话粘性开关（true=每次新会话），播种进 settings |
+| `DUCKAI_PROXIES` / `DUCKAI_PROXY` | 空 | 合并去重校验；`direct` 关键字=显式直连；仅空表播种，之后以 egress 表为准 |
+| `DUCKAI_DEFAULT_API_KEY` | 空 | Bearer 鉴权引导值（仅空表导入一次）；空 + 非回环 → **启动即拒绝**。遗留 `DUCKAI_API_KEY` 仍可作别名 |
+| `DUCKAI_DEFAULT_ADMIN_PASSWORD` | 空 | WebUI 登录的 env 默认口令（库内口令优先）。遗留 `DUCKAI_ADMIN_PASSWORD` 仍可作别名；空=回环只读 |
+| `DUCKAI_DB_PATH` | `data/duckai.db` | sqlite 路径；`:memory:` 仅供测试 |
 | `PORT` / `DUCKAI_BIND` | `8080` / `127.0.0.1` | 监听地址；非回环必须配 API key |
 | `DUCKAI_MAX_CONCURRENCY` | `8` | 并发闸门：超限 **429 + retry-after**（可运行时调，立即生效） |
-| `DUCKAI_ADMIN_PASSWORD` | 空 | WebUI 登录会话；空=回环只读 |
 | `DUCKAI_CHROME_PATH` | 空 | browser 模式的浏览器路径 |
 | `RUST_LOG` | `info` | `tracing_subscriber::EnvFilter` |
 
@@ -75,7 +92,9 @@ ARCHITECTURE.md §8 原定 vanilla TypeScript + `tsc --noEmit`。**实现按产�
 
 - `crates/duckai-webui/ui/index.html` + `crates/duckai-webui/ui/app.js`，经 `rust-embed` 编入二进制；
 - 仅 `axios`、`highlight.js`、`tailwindcss` 三个 CDN 引用，零 npm/打包工具；
-- 中文界面：状态总览、模型列表、出口池与封禁、日志、设置（默认模型/并发上限/代理增删）、
+- 中文界面七个页面：状态总览、模型列表、出口池（**每出口独立策略编辑 + 启用开关 +
+  直连开关 + 手动封禁/解封**）、**API 密钥管理（前缀回显、一次性明文、吊销）**、日志、
+  设置（运行参数 / 代理增删 / **存储设置 base·VQD·新会话** / **改管理口令**）、
   三协议请求示例与在线试发（可选模型）。
 
 `webui` feature 关闭时静态路由与管理 API 全部不注册（`cargo build --no-default-features --features http`）。
