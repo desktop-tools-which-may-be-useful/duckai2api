@@ -28,8 +28,12 @@ pub struct ServerConfig {
     pub default_model: String,
     /// `DUCKAI_NEW_CHAT`：true 时会话不粘。
     pub new_chat: bool,
-    /// `DUCKAI_PROXIES` + `DUCKAI_PROXY` 合并去重校验后的最终列表（空 = 直连）。
+    /// `DUCKAI_PROXIES` + `DUCKAI_PROXY` 合并去重校验后的最终出口条目列表
+    /// （空 = 直连；关键字 `direct` 可显式与代理并存）。
     pub proxies: Vec<String>,
+    /// 与 [`Self::proxies`] 平行的 per-egress 策略；装配层从 `egress` 表回填
+    /// （env 阶段恒为空 = 全默认，库内策略优先）。
+    pub egress_policies: Vec<duckai_types::EgressPolicy>,
     /// 默认/引导 API key：`DUCKAI_DEFAULT_API_KEY`（兼容旧名 `DUCKAI_API_KEY`）。
     /// 仅在库内 `api_keys` 表为空时作为第一把 key 导入；库非空后以库为准。
     pub default_api_key: Option<String>,
@@ -130,6 +134,7 @@ impl ServerConfig {
             default_model,
             new_chat,
             proxies,
+            egress_policies: Vec::new(),
             default_api_key,
             bind,
             port,
@@ -159,6 +164,7 @@ impl ServerConfig {
             vqd_override: self.vqd_override.clone(),
             new_chat: self.new_chat,
             proxies: self.proxies.clone(),
+            policies: self.egress_policies.clone(),
             chrome_path: self.chrome_path.clone(),
         })
     }
@@ -353,6 +359,19 @@ mod tests {
         assert!(cfg.proxies.contains(&"https://c:443".to_string()));
         let bad = ServerConfig::from_lookup(&lookup(&[("DUCKAI_PROXIES", "ftp://x")]));
         assert!(bad.is_err(), "未知协议拒绝");
+
+        // direct 关键字：可显式与代理并存（P0-6 出口可配置化）
+        let mixed =
+            ServerConfig::from_lookup(&lookup(&[("DUCKAI_PROXIES", "socks5://b:1080, direct")]))
+                .expect("direct 关键字合法");
+        assert_eq!(
+            mixed.proxies,
+            vec!["socks5://b:1080".to_string(), "direct".to_string()]
+        );
+        assert!(
+            mixed.egress_policies.is_empty(),
+            "env 阶段策略恒空（全默认）"
+        );
     }
 
     #[test]

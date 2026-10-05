@@ -17,14 +17,11 @@
 
 use std::time::Duration;
 
-/// 首次封禁冷却时长（秒）——418 持久型，到期后半开探测。
-pub const INITIAL_BAN_SECS: u64 = 5 * 60;
-/// 冷却倍增上限（24 小时，§6.1「上限 24h」）。
-pub const BAN_CAP_SECS: u64 = 24 * 60 * 60;
-/// 429 退避上限（10 分钟，§6.1）。
-pub const COOLDOWN_CAP_SECS: u64 = 10 * 60;
-/// 429 无 Retry-After 时的起始退避（5s，指数倍增）。
-pub const RATE_LIMIT_BASE_SECS: u64 = 5;
+use duckai_types::EgressPolicy;
+
+pub use duckai_types::policy::{
+    BAN_CAP_SECS, COOLDOWN_CAP_SECS, INITIAL_BAN_SECS, RATE_LIMIT_BASE_SECS,
+};
 
 /// 单出口状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +64,8 @@ pub struct EgressStatus {
 #[derive(Debug)]
 pub struct EgressMachine {
     status: EgressStatus,
+    /// 该出口的可配置策略（冷却开关/封禁时长/停用），默认 = §6.1 基线常量。
+    policy: EgressPolicy,
 }
 
 impl Default for EgressMachine {
@@ -77,6 +76,11 @@ impl Default for EgressMachine {
 
 impl EgressMachine {
     pub fn new() -> Self {
+        Self::with_policy(EgressPolicy::default())
+    }
+
+    /// 指定策略构建（池启动时由 `egress` 表注入）。
+    pub fn with_policy(policy: EgressPolicy) -> Self {
         Self {
             status: EgressStatus {
                 state: EgressState::Healthy,
@@ -86,6 +90,23 @@ impl EgressMachine {
                 ban_rounds: 0,
                 since_ms: 0,
             },
+            policy,
+        }
+    }
+
+    /// 当前策略（分发开关与快照渲染读取）。
+    pub fn policy(&self) -> &EgressPolicy {
+        &self.policy
+    }
+
+    /// 运行时更新策略：关闭冷却即把非健康态清回分发池（策略即开关）。
+    pub fn set_policy(&mut self, policy: EgressPolicy) {
+        self.policy = policy;
+        if !policy.cooldown_enabled && !matches!(self.status.state, EgressState::Healthy) {
+            self.status.state = EgressState::Healthy;
+            self.status.until_ms = 0;
+            self.status.reason = "cooldown disabled".to_string();
+            self.status.since_ms = now_ms();
         }
     }
 
@@ -144,14 +165,26 @@ impl EgressMachine {
         };
     }
 
-    /// 429 → Cooldown：尊重 Retry-After，缺省 5s 指数退避，上限 10min。
+    /// 429 → Cooldown：尊重 Retry-After，缺省按策略起始退避指数倍增，上限 10min。
+    /// 策略关闭冷却时仅扣连续失败计数，状态保持 Healthy（该出口失败不降级）。
     pub fn on_rate_limited(&mut self, now_ms: u64, retry_after_secs: Option<u64>) {
         self.refresh(now_ms);
         let failures = self.status.consecutive_failures;
         self.status.consecutive_failures = failures + 1;
+        if !self.policy.cooldown_enabled {
+            if self.status.state != EgressState::Healthy {
+                self.status.state = EgressState::Healthy;
+                self.status.until_ms = 0;
+            }
+            self.status.reason = "429 ignored (cooldown disabled)".to_string();
+            self.status.since_ms = now_ms;
+            return;
+        }
         let secs = match retry_after_secs {
             Some(s) if s > 0 => s,
-            _ => RATE_LIMIT_BASE_SECS
+            _ => self
+                .policy
+                .rate_limit_secs
                 .saturating_mul(1u64 << failures.min(8))
                 .min(COOLDOWN_CAP_SECS),
         }
@@ -166,15 +199,32 @@ impl EgressMachine {
         self.status.since_ms = now_ms;
     }
 
-    /// 418 ERR_BN_LIMIT 等持久型受限 → 直接 Banned（长冷却，轮次倍增，上限 24h）。
+    /// 418 ERR_BN_LIMIT 等持久型受限 → 直接 Banned（长冷却，轮次倍增，
+    /// 首值/上限取该出口策略）。策略关闭冷却时仅记录原因，状态不降级。
     pub fn on_banned(&mut self, now_ms: u64, reason: &str) {
         self.refresh(now_ms);
-        let rounds = self.status.ban_rounds;
-        self.status.ban_rounds = rounds.saturating_add(1);
+        self.status.ban_rounds = self.status.ban_rounds.saturating_add(1);
         self.status.consecutive_failures = self.status.consecutive_failures.saturating_add(1);
-        let secs = INITIAL_BAN_SECS
+        if !self.policy.cooldown_enabled {
+            if self.status.state != EgressState::Healthy {
+                self.status.state = EgressState::Healthy;
+                self.status.until_ms = 0;
+            }
+            self.status.reason = format!("{reason} (cooldown disabled)");
+            self.status.since_ms = now_ms;
+            return;
+        }
+        self.apply_ban(now_ms, reason);
+    }
+
+    /// 封禁状态落库到本机（计数已由调用方递增）：首值按轮次倍增，封顶策略上限。
+    fn apply_ban(&mut self, now_ms: u64, reason: &str) {
+        let rounds = self.status.ban_rounds.saturating_sub(1);
+        let secs = self
+            .policy
+            .ban_secs
             .saturating_mul(1u64 << rounds.min(6))
-            .min(BAN_CAP_SECS);
+            .min(self.policy.ban_cap_secs);
         self.status.state = EgressState::Banned;
         self.status.until_ms = now_ms.saturating_add(secs.saturating_mul(1000));
         self.status.reason = reason.to_string();
@@ -205,9 +255,12 @@ impl EgressMachine {
         };
     }
 
-    /// 运维手动封禁。
+    /// 运维手动封禁：显式后门，**绕过**策略的冷却开关（管理员说了算）。
     pub fn admin_ban(&mut self, now_ms: u64) {
-        self.on_banned(now_ms, "admin ban");
+        self.refresh(now_ms);
+        self.status.ban_rounds = self.status.ban_rounds.saturating_add(1);
+        self.status.consecutive_failures = self.status.consecutive_failures.saturating_add(1);
+        self.apply_ban(now_ms, "admin ban");
     }
 
     /// 距离冷却结束的剩余秒数（0 = 无冷却）。
@@ -327,5 +380,83 @@ mod tests {
         assert_eq!(st.consecutive_failures, 0);
         assert_eq!(st.ban_rounds, 0);
         assert_eq!(st.until_ms, 0);
+    }
+
+    // ---- per-egress 策略 ----
+
+    #[test]
+    fn policy_cooldown_disabled_never_transitions() {
+        let p = EgressPolicy {
+            cooldown_enabled: false,
+            ..EgressPolicy::default()
+        };
+        let mut m = EgressMachine::with_policy(p);
+        m.on_banned(0, "418");
+        let st = m.status(0);
+        assert_eq!(st.state, EgressState::Healthy, "关闭冷却 → 失败不降级");
+        assert_eq!(st.until_ms, 0);
+        assert!(st.reason.contains("cooldown disabled"), "{}", st.reason);
+        m.on_rate_limited(1_000, None);
+        let st = m.status(1_000);
+        assert_eq!(st.state, EgressState::Healthy);
+        assert!(
+            st.consecutive_failures >= 1,
+            "计数仍累计（健康分排序依赖它）"
+        );
+    }
+
+    #[test]
+    fn policy_custom_ban_duration_and_cap() {
+        let p = EgressPolicy {
+            ban_secs: 30,
+            ban_cap_secs: 60,
+            ..EgressPolicy::default()
+        };
+        let mut m = EgressMachine::with_policy(p);
+        m.on_banned(0, "418");
+        assert_eq!(m.status(0).until_ms, 30 * MS, "首封 30s");
+        m.on_banned(30 * MS, "418");
+        assert_eq!(
+            m.status(30 * MS).until_ms,
+            30 * MS + 60 * MS,
+            "倍增 60s 后封顶 cap"
+        );
+    }
+
+    #[test]
+    fn set_policy_disable_clears_active_cooldown() {
+        let mut m = EgressMachine::new();
+        m.on_banned(0, "418");
+        assert_eq!(m.status(0).state, EgressState::Banned);
+        let mut p = *m.policy();
+        p.cooldown_enabled = false;
+        m.set_policy(p);
+        assert_eq!(m.status(0).state, EgressState::Healthy, "关冷却即解封");
+    }
+
+    #[test]
+    fn admin_ban_bypasses_cooldown_switch() {
+        let p = EgressPolicy {
+            cooldown_enabled: false,
+            ..EgressPolicy::default()
+        };
+        let mut m = EgressMachine::with_policy(p);
+        m.admin_ban(0);
+        assert_eq!(
+            m.status(0).state,
+            EgressState::Banned,
+            "手动封禁是显式后门，绕过策略开关"
+        );
+    }
+
+    #[test]
+    fn rate_limit_uses_policy_base() {
+        let p = EgressPolicy {
+            rate_limit_secs: 30,
+            ..EgressPolicy::default()
+        };
+        let mut m = EgressMachine::with_policy(p);
+        m.on_rate_limited(0, None);
+        assert_eq!(m.status(0).until_ms, 30 * MS, "按策略起始退避");
     }
 }

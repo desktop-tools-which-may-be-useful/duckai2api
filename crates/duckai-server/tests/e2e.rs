@@ -368,6 +368,195 @@ async fn admin_login_and_live_settings() {
     assert_eq!(v["model"], "gpt-5.6-terra");
 }
 
+/// C2 管理 API：密钥 CRUD / 出口策略 / 直连开关 / 设置保存 / 改口令，全部写穿。
+#[cfg(feature = "webui")]
+#[tokio::test]
+async fn admin_config_api_write_through() {
+    let server = MockServer::start().await;
+    mount_upstream(&server).await;
+    let app = duckai_server::build(cfg_for(
+        &server.uri(),
+        &[("DUCKAI_ADMIN_PASSWORD", "s3cret")],
+    ))
+    .expect("装配");
+
+    // 登录取会话（复用首测路径）
+    let res = call(
+        &app,
+        Request::post("/admin/api/login")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"password":"s3cret"}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK, "登录成功");
+    let cookie = res
+        .headers()
+        .get("set-cookie")
+        .expect("会话 cookie")
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    let api = |method: axum::http::Method, path: &str, body: &str| {
+        let req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .header("cookie", &cookie);
+        req.body(Body::from(body.to_string())).unwrap()
+    };
+
+    // ---- 密钥 CRUD ----
+    let res = call(&app, api(axum::http::Method::GET, "/admin/api/keys", "")).await;
+    assert_eq!(res.status(), StatusCode::OK, "keys 列表");
+    let v: serde_json::Value = serde_json::from_str(&body_string(res).await).unwrap();
+    assert_eq!(v["keys"].as_array().unwrap().len(), 1, "env 引导 key");
+
+    let res = call(
+        &app,
+        api(
+            axum::http::Method::POST,
+            "/admin/api/keys",
+            r#"{"label":"e2e"}"#,
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK, "建 key");
+    let v: serde_json::Value = serde_json::from_str(&body_string(res).await).unwrap();
+    let new_key = v["key"].as_str().unwrap().to_string();
+    assert!(new_key.starts_with("sk-"), "一次性明文：{new_key}");
+    let kid = v["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["label"] == "e2e")
+        .expect("在列")["id"]
+        .as_i64()
+        .unwrap();
+
+    let res = call(
+        &app,
+        api(
+            axum::http::Method::DELETE,
+            &format!("/admin/api/keys/{kid}"),
+            "",
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK, "吊销");
+
+    // ---- 出口策略（per-egress） ----
+    let res = call(
+        &app,
+        api(
+            axum::http::Method::POST,
+            "/admin/api/egress/policy",
+            r#"{"index":0,"policy":{"enabled":true,"cooldown_enabled":false,"ban_secs":42,"ban_cap_secs":3600,"rate_limit_secs":9}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK, "设策略");
+    let v: serde_json::Value = serde_json::from_str(&body_string(res).await).unwrap();
+    assert_eq!(v["egresses"][0]["ban_secs"], 42);
+    assert_eq!(
+        v["egresses"][0]["cooldown_enabled"],
+        serde_json::json!(false)
+    );
+
+    // 非法策略 400（不落库）
+    let res = call(
+        &app,
+        api(
+            axum::http::Method::POST,
+            "/admin/api/egress/policy",
+            r#"{"index":0,"policy":{"enabled":true,"cooldown_enabled":true,"ban_secs":0,"ban_cap_secs":86400,"rate_limit_secs":5}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST, "ban_secs=0 拒绝");
+
+    // ---- 直连开关（先加代理，保留最后一个出口规则） ----
+    let res = call(
+        &app,
+        api(
+            axum::http::Method::POST,
+            "/admin/api/proxy",
+            r#"{"url":"http://127.0.0.1:1080"}"#,
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK, "加代理");
+    let res = call(
+        &app,
+        api(
+            axum::http::Method::POST,
+            "/admin/api/egress/direct",
+            r#"{"enabled":false}"#,
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK, "关直连");
+    let v: serde_json::Value = serde_json::from_str(&body_string(res).await).unwrap();
+    assert!(
+        v["egresses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["direct"].as_bool() == Some(false)),
+        "直连已关：{}",
+        v["egresses"]
+    );
+
+    // ---- 设置保存（base 尾斜杠修剪 + 生效说明） ----
+    let res = call(
+        &app,
+        api(
+            axum::http::Method::POST,
+            "/admin/api/settings/save",
+            r#"{"base":"https://new.example/","vqd_override":"","new_chat":true}"#,
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK, "设置保存");
+    let v: serde_json::Value = serde_json::from_str(&body_string(res).await).unwrap();
+    assert_eq!(v["settings"]["base"], "https://new.example");
+    assert_eq!(v["settings"]["new_chat"], serde_json::json!(true));
+
+    // ---- 改口令：旧口令失效、新口令生效 ----
+    let res = call(
+        &app,
+        api(
+            axum::http::Method::POST,
+            "/admin/api/password",
+            r#"{"old":"s3cret","new":"newer-pass"}"#,
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK, "改口令");
+    let res = call(
+        &app,
+        Request::post("/admin/api/login")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"password":"s3cret"}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "旧口令已失效");
+    let res = call(
+        &app,
+        Request::post("/admin/api/login")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"password":"newer-pass"}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK, "新口令可登录");
+}
+
 /// WebUI 静态层：控制台页与两份资源可达（§8 静态覆盖实现）。
 #[cfg(feature = "webui")]
 #[tokio::test]

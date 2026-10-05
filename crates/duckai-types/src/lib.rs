@@ -6,6 +6,7 @@ pub mod auth;
 pub mod error;
 pub mod event;
 pub mod model;
+pub mod policy;
 pub mod snapshot;
 pub mod turn;
 
@@ -13,6 +14,7 @@ pub use auth::{AdminPassword, ApiKeyAuth};
 pub use error::{EgressScope, UpstreamError};
 pub use event::UpstreamEvent;
 pub use model::{ModelInfo, ModelSource};
+pub use policy::EgressPolicy;
 pub use snapshot::{
     AdminControl, AdminState, ApiKeyInfo, EgressHealth, EgressSnapshot, HealthSnapshot, LogEntry,
     SettingsSnapshot, UpstreamHealth,

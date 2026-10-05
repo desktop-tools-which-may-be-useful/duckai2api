@@ -26,10 +26,12 @@ pub use cooldown::{
     BAN_CAP_SECS, COOLDOWN_CAP_SECS, EgressMachine, EgressState, EgressStatus, INITIAL_BAN_SECS,
     RATE_LIMIT_BASE_SECS,
 };
+pub use duckai_types::EgressPolicy;
 #[cfg(feature = "http")]
 pub use http::{HttpConfig, HttpUpstream};
 pub use pool::{
-    EgressHandle, EgressPool, PER_EGRESS_LIMIT, PoolError, parse_proxy_config, sanitize_proxy_url,
+    DIRECT_ENTRY, EgressHandle, EgressPool, PER_EGRESS_LIMIT, PoolError, is_direct_entry,
+    parse_proxy_config, sanitize_proxy_url,
 };
 #[cfg(feature = "testutil")]
 pub use testkit::{MockUpstream, ScriptedTurn};
@@ -115,8 +117,11 @@ pub struct FactoryConfig {
     pub vqd_override: Option<String>,
     /// `DUCKAI_NEW_CHAT`：true 时会话不粘。
     pub new_chat: bool,
-    /// 代理列表（`DUCKAI_PROXIES` + `DUCKAI_PROXY` 合并后已切分；空=直连）。
+    /// 出口条目（`DUCKAI_PROXIES` + `DUCKAI_PROXY` 合并后已切分；空=直连，
+    /// 关键字 `direct` 可与代理并存）。
     pub proxies: Vec<String>,
+    /// 与 [`Self::proxies`] 平行的 per-egress 策略（短于条目列表的走默认）。
+    pub policies: Vec<EgressPolicy>,
     /// `DUCKAI_CHROME_PATH`（browser 模式）。
     pub chrome_path: Option<String>,
 }
@@ -129,6 +134,7 @@ impl Default for FactoryConfig {
             vqd_override: None,
             new_chat: false,
             proxies: Vec::new(),
+            policies: Vec::new(),
             chrome_path: None,
         }
     }
@@ -139,7 +145,9 @@ pub struct UpstreamFactory;
 
 impl UpstreamFactory {
     pub fn build(cfg: FactoryConfig) -> Result<Arc<dyn UpstreamClient>, String> {
-        let pool = Arc::new(EgressPool::new(&cfg.proxies).map_err(|e| e.to_string())?);
+        let pool = Arc::new(
+            EgressPool::with_policies(&cfg.proxies, &cfg.policies).map_err(|e| e.to_string())?,
+        );
         match cfg.mode {
             UpstreamMode::Http => build_http(cfg, pool),
             UpstreamMode::Browser => build_browser(cfg, pool),

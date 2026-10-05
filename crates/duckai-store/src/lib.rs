@@ -14,8 +14,8 @@ use argon2::Argon2;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt};
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
-use duckai_types::ApiKeyInfo;
-use rusqlite::{Connection, params};
+use duckai_types::{ApiKeyInfo, EgressPolicy};
+use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, thiserror::Error)]
@@ -56,7 +56,44 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS egress (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    url              TEXT,
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    cooldown_enabled INTEGER NOT NULL DEFAULT 1,
+    ban_secs         INTEGER NOT NULL DEFAULT 300,
+    ban_cap_secs     INTEGER NOT NULL DEFAULT 86400,
+    rate_limit_secs  INTEGER NOT NULL DEFAULT 5,
+    sort             INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS egress_url_uk ON egress(url) WHERE url IS NOT NULL;
 "#;
+
+/// 出口行（配置类，不存封禁运行态）。`url == None` = 显式 direct 行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EgressRow {
+    pub id: i64,
+    pub url: Option<String>,
+    pub enabled: bool,
+    pub cooldown_enabled: bool,
+    pub ban_secs: u64,
+    pub ban_cap_secs: u64,
+    pub rate_limit_secs: u64,
+    pub sort: i64,
+}
+
+impl EgressRow {
+    /// 并行映射到出口池策略。
+    pub fn policy(&self) -> EgressPolicy {
+        EgressPolicy {
+            enabled: self.enabled,
+            cooldown_enabled: self.cooldown_enabled,
+            ban_secs: self.ban_secs,
+            ban_cap_secs: self.ban_cap_secs,
+            rate_limit_secs: self.rate_limit_secs,
+        }
+    }
+}
 
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
@@ -281,6 +318,175 @@ impl Store {
         }
         Ok(out)
     }
+
+    // ------------------------------------------------------------- 出口（per-egress 策略）
+
+    /// 出口列表（`sort, id` 即出口池槽位顺序）。
+    pub fn egresses(&self) -> Result<Vec<EgressRow>, StoreError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, url, enabled, cooldown_enabled, ban_secs, ban_cap_secs,
+                    rate_limit_secs, sort
+             FROM egress ORDER BY sort, id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(EgressRow {
+                id: r.get(0)?,
+                url: r.get(1)?,
+                enabled: r.get(2)?,
+                cooldown_enabled: r.get(3)?,
+                ban_secs: r.get::<_, i64>(4)?.max(0) as u64,
+                ban_cap_secs: r.get::<_, i64>(5)?.max(0) as u64,
+                rate_limit_secs: r.get::<_, i64>(6)?.max(0) as u64,
+                sort: r.get(7)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// 首启引导：`egress` 表为空时按 env 条目播种（`None` = 直连；空列表播种单一直连行）。
+    /// 返回 `true` 表示本次播种；已有行时不动（库为准）。
+    pub fn seed_egresses(&self, entries: &[Option<String>]) -> Result<bool, StoreError> {
+        let d = EgressPolicy::default();
+        let mut conn = self.lock();
+        let existing: i64 = conn.query_row("SELECT COUNT(*) FROM egress", [], |r| r.get(0))?;
+        if existing > 0 {
+            return Ok(false);
+        }
+        let tx = conn.transaction()?;
+        let rows: Vec<Option<String>> = if entries.is_empty() {
+            vec![None]
+        } else {
+            entries.to_vec()
+        };
+        for (i, url) in rows.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO egress (url, enabled, cooldown_enabled, ban_secs, ban_cap_secs,
+                                     rate_limit_secs, sort)
+                 VALUES (?1, 1, 1, ?2, ?3, ?4, ?5)",
+                params![
+                    url,
+                    d.ban_secs as i64,
+                    d.ban_cap_secs as i64,
+                    d.rate_limit_secs as i64,
+                    i as i64
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// 按条目定位行 id（`None` = direct 行）。
+    fn egress_id(&self, url: Option<&str>) -> Result<Option<i64>, StoreError> {
+        let conn = self.lock();
+        let id = match url {
+            Some(u) => conn
+                .query_row("SELECT id FROM egress WHERE url = ?1", params![u], |r| {
+                    r.get(0)
+                })
+                .optional()?,
+            None => conn
+                .query_row("SELECT id FROM egress WHERE url IS NULL", [], |r| r.get(0))
+                .optional()?,
+        };
+        Ok(id)
+    }
+
+    /// 新增出口行（已存在返回既有 id；direct 行全表唯一）。
+    pub fn upsert_egress(&self, url: Option<&str>) -> Result<i64, StoreError> {
+        if let Some(id) = self.egress_id(url)? {
+            return Ok(id);
+        }
+        let d = EgressPolicy::default();
+        let conn = self.lock();
+        let sort: i64 =
+            conn.query_row("SELECT COALESCE(MAX(sort), -1) + 1 FROM egress", [], |r| {
+                r.get(0)
+            })?;
+        conn.execute(
+            "INSERT INTO egress (url, enabled, cooldown_enabled, ban_secs, ban_cap_secs,
+                                 rate_limit_secs, sort)
+             VALUES (?1, 1, 1, ?2, ?3, ?4, ?5)",
+            params![
+                url,
+                d.ban_secs as i64,
+                d.ban_cap_secs as i64,
+                d.rate_limit_secs as i64,
+                sort
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// 删除出口行（行不存在返回 false）。
+    pub fn delete_egress(&self, url: Option<&str>) -> Result<bool, StoreError> {
+        let n = match url {
+            Some(u) => self
+                .lock()
+                .execute("DELETE FROM egress WHERE url = ?1", params![u])?,
+            None => self
+                .lock()
+                .execute("DELETE FROM egress WHERE url IS NULL", [])?,
+        };
+        Ok(n > 0)
+    }
+
+    /// 更新单出口策略四元组（行不存在返回 false）。
+    pub fn set_egress_policy(
+        &self,
+        url: Option<&str>,
+        cooldown_enabled: bool,
+        ban_secs: u64,
+        ban_cap_secs: u64,
+        rate_limit_secs: u64,
+    ) -> Result<bool, StoreError> {
+        let n = match url {
+            Some(u) => self.lock().execute(
+                "UPDATE egress SET cooldown_enabled = ?1, ban_secs = ?2, ban_cap_secs = ?3,
+                                   rate_limit_secs = ?4
+                 WHERE url = ?5",
+                params![
+                    cooldown_enabled,
+                    ban_secs as i64,
+                    ban_cap_secs as i64,
+                    rate_limit_secs as i64,
+                    u
+                ],
+            )?,
+            None => self.lock().execute(
+                "UPDATE egress SET cooldown_enabled = ?1, ban_secs = ?2, ban_cap_secs = ?3,
+                                   rate_limit_secs = ?4
+                 WHERE url IS NULL",
+                params![
+                    cooldown_enabled,
+                    ban_secs as i64,
+                    ban_cap_secs as i64,
+                    rate_limit_secs as i64
+                ],
+            )?,
+        };
+        Ok(n > 0)
+    }
+
+    /// 启用/停用单出口（行不存在返回 false）。
+    pub fn set_egress_enabled(&self, url: Option<&str>, enabled: bool) -> Result<bool, StoreError> {
+        let n = match url {
+            Some(u) => self.lock().execute(
+                "UPDATE egress SET enabled = ?1 WHERE url = ?2",
+                params![enabled, u],
+            )?,
+            None => self.lock().execute(
+                "UPDATE egress SET enabled = ?1 WHERE url IS NULL",
+                params![enabled],
+            )?,
+        };
+        Ok(n > 0)
+    }
 }
 
 impl duckai_types::ApiKeyAuth for Store {
@@ -432,6 +638,90 @@ mod tests {
         let s = Store::open(&path).expect("重开");
         assert!(s.has_active_key(), "key 跨进程持久");
         assert_eq!(s.get_setting("k").as_deref(), Some("v"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- egress 表 ----
+
+    #[test]
+    fn egress_seed_is_first_boot_only_and_defaults_policy() {
+        let s = mem();
+        let entries = vec![Some("socks5://b:1080".to_string()), None];
+        assert!(s.seed_egresses(&entries).expect("播种"), "首空播种");
+        assert!(
+            !s.seed_egresses(&[Some("http://x:1".to_string())])
+                .expect("重播"),
+            "已有行不再播种（库为准）"
+        );
+        let rows = s.egresses().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].url.as_deref(), Some("socks5://b:1080"));
+        assert_eq!(rows[1].url, None, "None = 显式 direct 行");
+        let d = EgressPolicy::default();
+        assert_eq!(rows[1].policy(), d, "播种默认 = §6.1 基线");
+        assert!(rows[0].enabled && rows[0].cooldown_enabled);
+    }
+
+    #[test]
+    fn egress_seed_empty_list_grows_single_direct_row() {
+        let s = mem();
+        assert!(s.seed_egresses(&[]).expect("播"));
+        let rows = s.egresses().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].url, None);
+    }
+
+    #[test]
+    fn egress_upsert_is_idempotent_and_direct_single_row() {
+        let s = mem();
+        let a1 = s.upsert_egress(Some("http://a:1")).unwrap();
+        let a2 = s.upsert_egress(Some("http://a:1")).unwrap();
+        assert_eq!(a1, a2, "同一 URL 复用行");
+        let d1 = s.upsert_egress(None).unwrap();
+        let d2 = s.upsert_egress(None).unwrap();
+        assert_eq!(d1, d2, "direct 行全表唯一（NULL 也要挡）");
+        assert_eq!(s.egresses().unwrap().len(), 2);
+        assert!(
+            s.upsert_egress(Some("http://a:1")).unwrap()
+                < s.upsert_egress(Some("http://z:9")).unwrap(),
+            "sort 递增"
+        );
+    }
+
+    #[test]
+    fn egress_policy_and_toggle_persist_across_reopen() {
+        let path = tmp_path("egress-reopen");
+        {
+            let s = Store::open(&path).expect("首开");
+            s.upsert_egress(None).expect("direct 行");
+            assert!(
+                s.set_egress_policy(None, false, 60, 3600, 30)
+                    .expect("改策略")
+            );
+            assert!(s.set_egress_enabled(None, false).expect("停用"));
+            assert!(
+                !s.set_egress_policy(Some("http://gone:1"), true, 1, 1, 1)
+                    .unwrap(),
+                "不存在的行返回 false"
+            );
+        }
+        let s = Store::open(&path).expect("重开");
+        let rows = s.egresses().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].policy(),
+            EgressPolicy {
+                enabled: false,
+                cooldown_enabled: false,
+                ban_secs: 60,
+                ban_cap_secs: 3600,
+                rate_limit_secs: 30,
+            },
+            "出口策略是配置，跨重启持久"
+        );
+        assert!(s.delete_egress(None).expect("删 direct"));
+        assert!(!s.delete_egress(None).expect("再删 = 不存在"));
+        assert!(s.egresses().unwrap().is_empty());
         let _ = std::fs::remove_file(&path);
     }
 }

@@ -45,6 +45,18 @@ pub struct EgressSnapshot {
     /// 代理 URL（脱敏，仅协议+主机；无凭据）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
+    /// true = 直连出口（无代理）。
+    pub direct: bool,
+    /// 出口启用开关（false = 不参与分发/探测）。
+    pub enabled: bool,
+    /// 失败是否冷却（false = 418/429 不降级，只扣健康分）。
+    pub cooldown_enabled: bool,
+    /// 首次封禁秒数（倍增底）。
+    pub ban_secs: u64,
+    /// 封禁秒数上限。
+    pub ban_cap_secs: u64,
+    /// 429 无 Retry-After 的起始退避秒数。
+    pub rate_limit_secs: u64,
 }
 
 /// 结构化请求日志条目（环形缓冲，默认 500 条；不含上游响应全文与任何密钥）。
@@ -101,6 +113,10 @@ pub struct SettingsSnapshot {
     pub new_chat: bool,
     /// 脱敏代理列表。
     pub proxies: Vec<String>,
+    /// 上游 BASE（库内生效值；修改需重启后重建上游客户端）。
+    pub base: String,
+    /// 运维捕获的 x-vqd-hash-1 覆盖（None = 不注入）。
+    pub vqd_override: Option<String>,
 }
 
 /// WebUI 只读数据源（实现于 duckai-server；UI 层只依赖本 trait，禁止反向依赖）。
@@ -126,4 +142,28 @@ pub trait AdminControl: AdminState {
     fn remove_proxy(&self, url: String) -> Result<(), String>;
     fn set_default_model(&self, model: String) -> Result<(), String>;
     fn set_max_concurrency(&self, n: usize) -> Result<(), String>;
+
+    // ---- 出口策略（per-egress，先落库后改池，重启仍生效） ----
+    /// 更新单个出口的完整策略（enabled/cooldown/封禁时长/429 退避）。
+    fn set_egress_policy(&self, index: usize, policy: crate::EgressPolicy) -> Result<(), String>;
+    /// 启用/停用直连出口（不在池内则添加，移除则删除该条目）。
+    fn set_direct_egress(&self, enabled: bool) -> Result<(), String>;
+
+    // ---- API key 管理（库内持久化） ----
+    fn list_api_keys(&self) -> Vec<ApiKeyInfo>;
+    /// 新建密钥；返回一次性明文（仅此一次可见，界面需提示保存）。
+    fn create_api_key(&self, label: String) -> Result<String, String>;
+    /// 吊销；false = id 不存在或已吊销。
+    fn revoke_api_key(&self, id: i64) -> Result<bool, String>;
+
+    // ---- 设置持久化 / 管理口令 ----
+    /// 保存 base/vqd_override/new_chat 到库；返回生效说明（部分项需重启）。
+    fn save_settings(
+        &self,
+        base: String,
+        vqd_override: String,
+        new_chat: bool,
+    ) -> Result<String, String>;
+    /// 修改管理口令（校验旧口令；未配置旧口令时直接设置）。
+    fn change_admin_password(&self, old: String, new: String) -> Result<(), String>;
 }

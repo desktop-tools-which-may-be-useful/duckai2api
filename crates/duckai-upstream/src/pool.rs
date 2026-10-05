@@ -13,11 +13,20 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use duckai_types::EgressPolicy;
 use duckai_types::error::EgressScope;
 use duckai_types::snapshot::EgressSnapshot;
 use thiserror::Error;
 
 use crate::cooldown::{EgressMachine, EgressState, now_ms};
+
+/// 出口列表里的直连关键字（`DUCKAI_PROXIES="socks5://…, direct"` 可与代理并存）。
+pub const DIRECT_ENTRY: &str = "direct";
+
+/// 是否为直连条目（关键字不参与 scheme 校验）。
+pub fn is_direct_entry(url: &str) -> bool {
+    url.eq_ignore_ascii_case(DIRECT_ENTRY)
+}
 
 /// 单 egress 并发上限（§6.1）。
 pub const PER_EGRESS_LIMIT: usize = 2;
@@ -34,6 +43,7 @@ pub enum PoolError {
 }
 
 /// 合并 `DUCKAI_PROXIES`（逗号分隔）与遗留 `DUCKAI_PROXY`，去空、去重、校验 scheme。
+/// 关键字 `direct` 表示直连条目（可与代理并存，保序去重）。
 pub fn parse_proxy_config(
     proxies: Option<&str>,
     single: Option<&str>,
@@ -48,8 +58,10 @@ pub fn parse_proxy_config(
         if url.is_empty() {
             continue;
         }
-        validate_proxy(url)?;
-        if !out.iter().any(|e| e == url) {
+        if !is_direct_entry(url) {
+            validate_proxy(url)?;
+        }
+        if !out.iter().any(|e| e.eq_ignore_ascii_case(url)) {
             out.push(url.to_string());
         }
     }
@@ -122,25 +134,44 @@ impl std::fmt::Debug for EgressPool {
     }
 }
 
-fn new_slot(proxy_url: Option<String>) -> Slot {
+fn new_slot(proxy_url: Option<String>, policy: EgressPolicy) -> Slot {
     Slot {
         proxy_url,
-        machine: Mutex::new(EgressMachine::new()),
+        machine: Mutex::new(EgressMachine::with_policy(policy)),
         score: Mutex::new(VecDeque::new()),
         inflight: AtomicUsize::new(0),
     }
 }
 
 impl EgressPool {
-    /// `proxies` 为空 → 单一直连出口；非空 → 仅这些代理（不泄漏直连）。
-    pub fn new(proxies: &[String]) -> Result<Self, PoolError> {
-        for p in proxies {
-            validate_proxy(p)?;
+    /// `entries` 为空 → 单一直连出口；非空 → 按条目建槽
+    /// （关键字 [`DIRECT_ENTRY`] = 直连槽，可与代理并存；无 direct 条目则不泄漏直连）。
+    pub fn new(entries: &[String]) -> Result<Self, PoolError> {
+        Self::with_policies(entries, &[])
+    }
+
+    /// 按条目 + 并行策略列表建槽（`policies` 较短的条目走默认策略）。
+    pub fn with_policies(entries: &[String], policies: &[EgressPolicy]) -> Result<Self, PoolError> {
+        for p in entries {
+            if !is_direct_entry(p) {
+                validate_proxy(p)?;
+            }
         }
-        let slots: Vec<Slot> = if proxies.is_empty() {
-            vec![new_slot(None)]
+        let slots: Vec<Slot> = if entries.is_empty() {
+            vec![new_slot(None, EgressPolicy::default())]
         } else {
-            proxies.iter().map(|p| new_slot(Some(p.clone()))).collect()
+            entries
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let target: Option<String> = if is_direct_entry(p) {
+                        None
+                    } else {
+                        Some(p.clone())
+                    };
+                    new_slot(target, policies.get(i).copied().unwrap_or_default())
+                })
+                .collect()
         };
         Ok(Self {
             slots: std::sync::RwLock::new(slots),
@@ -162,18 +193,32 @@ impl EgressPool {
         self.with_slots(|slots| slots.is_empty())
     }
 
-    /// 原始代理 URL 列表（管理面内部用；对外快照一律经 [`sanitize_proxy_url`])。
+    /// 出口条目列表（管理面内部用；直连槽以关键字 [`DIRECT_ENTRY`] 表示）。
+    /// 供管理面「增删代理」重建时使用——保留 direct 条目，修「设代理后直连丢失」。
+    pub fn entries(&self) -> Vec<String> {
+        self.with_slots(|slots| {
+            slots
+                .iter()
+                .map(|s| match &s.proxy_url {
+                    Some(p) => p.clone(),
+                    None => DIRECT_ENTRY.to_string(),
+                })
+                .collect()
+        })
+    }
+
+    /// 原始代理 URL 列表（不含直连；对外快照一律经 [`sanitize_proxy_url`])。
     pub fn proxy_urls(&self) -> Vec<String> {
         self.with_slots(|slots| slots.iter().filter_map(|s| s.proxy_url.clone()).collect())
     }
 
-    /// 当前可分发（Healthy）的出口数。
+    /// 当前可分发（Healthy 且启用）的出口数。
     pub fn healthy_count(&self) -> usize {
         let now = now_ms();
         self.with_slots(|slots| {
             slots
                 .iter()
-                .filter(|s| self.with_machine(s, |m| m.is_dispatchable(now)))
+                .filter(|s| self.with_machine(s, |m| m.policy().enabled && m.is_dispatchable(now)))
                 .count()
         })
     }
@@ -197,13 +242,13 @@ impl EgressPool {
         let fp = session_hint.map(duckai_protocol::chat::session_fingerprint);
 
         self.with_slots(|slots| {
-            // 1) 健康集合（Healthy 且未达并发上限）
+            // 1) 健康集合（Healthy、启用且未达并发上限）
             let candidates: Vec<usize> = slots
                 .iter()
                 .enumerate()
                 .filter(|(_, s)| {
                     s.inflight.load(Ordering::SeqCst) < PER_EGRESS_LIMIT
-                        && self.with_machine(s, |m| m.is_dispatchable(now))
+                        && self.with_machine(s, |m| m.policy().enabled && m.is_dispatchable(now))
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -225,13 +270,13 @@ impl EgressPool {
                 return self.take(slots, best, fp.clone());
             }
 
-            // 4) 全部不可用 → HalfOpen 出口允许探测 1 次（inflight==0）
+            // 4) 全部不可用 → HalfOpen 出口允许探测 1 次（inflight==0，须启用）
             let probe = slots
                 .iter()
                 .enumerate()
                 .find(|(_, s)| {
                     s.inflight.load(Ordering::SeqCst) == 0
-                        && self.with_machine(s, |m| m.is_probe_candidate(now))
+                        && self.with_machine(s, |m| m.policy().enabled && m.is_probe_candidate(now))
                 })
                 .map(|(i, _)| i)?;
             self.take(slots, probe, fp)
@@ -316,6 +361,18 @@ impl EgressPool {
         });
     }
 
+    /// 运维：更新单个出口的策略（启用/冷却开关/封禁时长/429 退避）。
+    pub fn set_policy(&self, index: usize, policy: EgressPolicy) -> Result<(), String> {
+        policy.validate()?;
+        self.with_slots(|slots| {
+            let slot = slots
+                .get(index)
+                .ok_or_else(|| format!("egress #{index} 不存在"))?;
+            self.with_machine(slot, |m| m.set_policy(policy));
+            Ok(())
+        })
+    }
+
     /// 运维：手动封禁（P1-6 后门之一）。
     pub fn admin_ban(&self, index: usize) -> Result<(), String> {
         self.with_slots(|slots| {
@@ -386,9 +443,14 @@ impl EgressPool {
                 .iter()
                 .enumerate()
                 .map(|(i, s)| {
-                    let (state, since, reason) = self.with_machine(s, |m| {
+                    let (state, since, reason, pol) = self.with_machine(s, |m| {
                         let st = m.status(now);
-                        (st.state.as_str().to_string(), st.since_ms, st.reason)
+                        (
+                            st.state.as_str().to_string(),
+                            st.since_ms,
+                            st.reason,
+                            *m.policy(),
+                        )
                     });
                     EgressSnapshot {
                         index: i,
@@ -403,20 +465,29 @@ impl EgressPool {
                             .as_deref()
                             .map(sanitize_proxy_url)
                             .filter(|u| u != "direct"),
+                        direct: s.proxy_url.is_none(),
+                        enabled: pol.enabled,
+                        cooldown_enabled: pol.cooldown_enabled,
+                        ban_secs: pol.ban_secs,
+                        ban_cap_secs: pol.ban_cap_secs,
+                        rate_limit_secs: pol.rate_limit_secs,
                     }
                 })
                 .collect()
         })
     }
 
-    /// 运维：运行时更换代理列表（管理面「增删代理」直达传输层，非死配置）。
+    /// 运维：运行时更换出口条目列表（管理面「增删代理/直连」直达传输层）。
     ///
-    /// - 仍保留的出口**原样保留**槽位（状态机与健康分不丢，封禁不因改池复活）；
-    /// - 新增出口新建槽位；被移除的出口直接丢弃；列表清空 → 恢复单一直连出口；
+    /// - 条目可用关键字 [`DIRECT_ENTRY`] 表示直连；保留的出口**原样保留**槽位
+    ///   （状态机、健康分与 per-egress 策略都不丢，封禁不因改池复活）；
+    /// - 新增出口新建槽位（默认策略）；被移除的出口直接丢弃；列表清空 → 恢复单一直连出口；
     /// - 有在途请求时拒绝（句柄按下标归还，重建会错配）；返回错误串供管理面直出。
-    pub fn reconfigure(&self, proxies: &[String]) -> Result<(), String> {
-        for p in proxies {
-            validate_proxy(p).map_err(|e| e.to_string())?;
+    pub fn reconfigure(&self, entries: &[String]) -> Result<(), String> {
+        for p in entries {
+            if !is_direct_entry(p) {
+                validate_proxy(p).map_err(|e| e.to_string())?;
+            }
         }
         let mut slots = self.slots.write().unwrap_or_else(|e| e.into_inner());
         let inflight: usize = slots
@@ -427,18 +498,20 @@ impl EgressPool {
             return Err("有在途请求，代理列表暂不可变更，请稍后重试".to_string());
         }
         let mut old: Vec<Slot> = std::mem::take(&mut *slots);
-        let mut next: Vec<Slot> = Vec::with_capacity(proxies.len().max(1));
-        for p in proxies {
-            match old
-                .iter()
-                .position(|s| s.proxy_url.as_deref() == Some(p.as_str()))
-            {
+        let mut next: Vec<Slot> = Vec::with_capacity(entries.len().max(1));
+        for p in entries {
+            let target: Option<&str> = if is_direct_entry(p) {
+                None
+            } else {
+                Some(p.as_str())
+            };
+            match old.iter().position(|s| s.proxy_url.as_deref() == target) {
                 Some(pos) => next.push(old.remove(pos)),
-                None => next.push(new_slot(Some(p.clone()))),
+                None => next.push(new_slot(target.map(String::from), EgressPolicy::default())),
             }
         }
         if next.is_empty() {
-            next.push(new_slot(None));
+            next.push(new_slot(None, EgressPolicy::default()));
         }
         *slots = next;
         drop(slots);
@@ -698,5 +771,117 @@ mod tests {
             "保留槽位：封禁状态与健康分不因改池丢失/复活"
         );
         assert_eq!(snap[2].state, "Healthy", "新增出口从健康态起步");
+    }
+
+    // ---- direct 关键字与 per-egress 策略 ----
+
+    #[test]
+    fn parse_accepts_direct_keyword() {
+        let merged =
+            parse_proxy_config(Some("socks5://b:1080, direct"), Some("direct,http://c:443"))
+                .unwrap();
+        assert_eq!(
+            merged,
+            vec![
+                "socks5://b:1080".to_string(),
+                "direct".to_string(),
+                "http://c:443".to_string()
+            ],
+            "direct 关键字保序去重（大小写不敏感），代理照常校验"
+        );
+        assert!(
+            parse_proxy_config(Some("DIRECT"), None).unwrap() == vec!["DIRECT".to_string()],
+            "大小写不敏感，但保留原始书写"
+        );
+        assert!(
+            parse_proxy_config(Some("ftp://x, direct"), None).is_err(),
+            "非法代理仍拒绝"
+        );
+    }
+
+    #[test]
+    fn direct_slot_coexists_with_proxy_and_survives_reconfigure() {
+        let entries = urls(&["direct", "http://a:1"]);
+        let pool = EgressPool::new(&entries).unwrap();
+        assert_eq!(pool.len(), 2, "直连与代理并存");
+        assert_eq!(pool.entries(), entries, "管理面读回同一条目列表");
+        assert_eq!(pool.proxy_urls(), vec!["http://a:1".to_string()]);
+        let snap = pool.snapshot();
+        assert!(snap[0].direct && !snap[1].direct);
+        // 管理面「加代理」用 entries() 重建 → 直连不丢（用户核心诉求）
+        let mut next = pool.entries();
+        next.push("socks5://b:1080".into());
+        pool.reconfigure(&next).unwrap();
+        assert_eq!(pool.len(), 3);
+        assert_eq!(pool.entries()[0], "direct", "直连条目仍在首位");
+        assert!(pool.snapshot()[0].direct, "直连槽保留");
+    }
+
+    #[test]
+    fn with_policies_applies_per_slot_policy() {
+        let disabled = EgressPolicy {
+            enabled: false,
+            ..EgressPolicy::default()
+        };
+        let slow_ban = EgressPolicy {
+            ban_secs: 42,
+            ban_cap_secs: 3600,
+            ..EgressPolicy::default()
+        };
+        let pool =
+            EgressPool::with_policies(&urls(&["direct", "http://a:1"]), &[disabled, slow_ban])
+                .unwrap();
+        let snap = pool.snapshot();
+        assert!(!snap[0].enabled, "停用出口不参与分发");
+        assert_eq!(snap[1].ban_secs, 42);
+        assert_eq!(pool.healthy_count(), 1, "停用出口不计入健康数");
+        // acquire 只会选中启用的出口
+        let h = pool.acquire(None).expect("有可分发出口");
+        assert_eq!(h.index, 1);
+        pool.release(&h);
+        // 停用出口的半开探测同样被跳过：封禁代理出口后无处分发
+        pool.admin_ban(1).expect("封禁代理出口");
+        assert!(pool.acquire(None).is_none(), "仅剩停用/封禁出口 → 无分发");
+    }
+
+    #[test]
+    fn reconfigure_preserves_per_slot_policy() {
+        let pool = EgressPool::new(&urls(&["http://a:1", "http://b:2"])).unwrap();
+        let p = EgressPolicy {
+            ban_secs: 77,
+            ban_cap_secs: 88,
+            rate_limit_secs: 9,
+            ..EgressPolicy::default()
+        };
+        pool.set_policy(1, p).expect("设策略");
+        pool.reconfigure(&[
+            "http://b:2".into(),
+            "http://a:1".into(),
+            "http://c:3".into(),
+        ])
+        .expect("改池");
+        let snap = pool.snapshot();
+        assert_eq!(snap[0].ban_secs, 77, "保留槽位：策略不因改池重置");
+        assert_eq!(snap[0].ban_cap_secs, 88);
+        assert_eq!(snap[0].rate_limit_secs, 9);
+        assert_eq!(snap[2].ban_secs, duckai_types::policy::INITIAL_BAN_SECS);
+        // 校验拒绝非法策略
+        let bad = EgressPolicy {
+            ban_secs: 0,
+            ..EgressPolicy::default()
+        };
+        assert!(pool.set_policy(0, bad).is_err(), "ban_secs=0 拒绝");
+        assert!(
+            pool.set_policy(99, EgressPolicy::default()).is_err(),
+            "越界拒绝"
+        );
+    }
+
+    #[test]
+    fn parse_direct_keyword_defaults_pool_to_single_direct() {
+        let entries = parse_proxy_config(Some("direct"), None).unwrap();
+        let pool = EgressPool::new(&entries).unwrap();
+        assert_eq!(pool.len(), 1);
+        assert!(pool.snapshot()[0].direct);
     }
 }

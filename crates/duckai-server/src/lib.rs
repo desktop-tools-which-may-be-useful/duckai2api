@@ -20,10 +20,16 @@ use axum::{Json, Router};
 use duckai_store::Store;
 use duckai_types::model::ModelCatalog;
 use duckai_types::{
-    AdminControl, AdminPassword, AdminState, EgressHealth, HealthSnapshot, ModelInfo,
-    SettingsSnapshot, UpstreamHealth,
+    AdminControl, AdminPassword, AdminState, ApiKeyInfo, EgressHealth, EgressPolicy,
+    HealthSnapshot, ModelInfo, SettingsSnapshot, UpstreamHealth,
 };
-use duckai_upstream::EgressPool;
+use duckai_upstream::{DIRECT_ENTRY, EgressPool, is_direct_entry, sanitize_proxy_url};
+
+/// 出口条目字符串（direct 关键字与出口池约定一致）。
+fn entry_of(url: Option<&str>) -> String {
+    url.map(str::to_string)
+        .unwrap_or_else(|| DIRECT_ENTRY.to_string())
+}
 
 /// 管理面实现：API 状态（闸门/默认模型/日志环）+ 启动配置快照 + 出口池 + 存储写穿。
 ///
@@ -34,10 +40,14 @@ use duckai_upstream::EgressPool;
 pub struct ServerAdmin {
     state: duckai_api::ApiState,
     bind: String,
-    new_chat: bool,
+    new_chat: RwLock<bool>,
+    /// 当前生效 BASE（`save_settings` 写穿；上游客户端需重启重建）。
+    base: RwLock<String>,
+    /// 运维捕获的 `x-vqd-hash-1` 覆盖。
+    vqd_override: RwLock<Option<String>>,
     /// 口令契约（只读来源：WebUI 登录与 `admin_password_set` 快照共用）。
     password: Arc<dyn AdminPassword>,
-    /// 配置存储（密钥/口令/设置写穿点）。
+    /// 配置存储（密钥/口令/设置/出口策略写穿点）。
     store: Arc<Store>,
     /// 模型列表缓存（30 分钟后台刷新；空时回落本地目录快照）。
     models: RwLock<Vec<ModelInfo>>,
@@ -48,13 +58,17 @@ impl ServerAdmin {
         state: duckai_api::ApiState,
         bind: String,
         new_chat: bool,
+        base: String,
+        vqd_override: Option<String>,
         password: Arc<dyn AdminPassword>,
         store: Arc<Store>,
     ) -> Arc<Self> {
         Arc::new(Self {
             state,
             bind,
-            new_chat,
+            new_chat: RwLock::new(new_chat),
+            base: RwLock::new(base),
+            vqd_override: RwLock::new(vqd_override),
             password,
             store,
             models: RwLock::new(Vec::new()),
@@ -126,8 +140,14 @@ impl AdminState for ServerAdmin {
             auth_enabled: self.state.auth.enabled(),
             admin_password_set: self.password.available(),
             upstream_mode: self.state.upstream.mode().to_string(),
-            new_chat: self.new_chat,
+            new_chat: *self.new_chat.read().unwrap_or_else(|e| e.into_inner()),
             proxies,
+            base: self.base.read().unwrap_or_else(|e| e.into_inner()).clone(),
+            vqd_override: self
+                .vqd_override
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
         }
     }
 
@@ -157,28 +177,75 @@ impl AdminControl for ServerAdmin {
 
     fn add_proxy(&self, url: String) -> Result<(), String> {
         let pool = self.pool_ref()?;
-        let mut urls = pool.proxy_urls();
-        let norm = duckai_upstream::sanitize_proxy_url(&url);
-        if urls
+        // 用完整出口条目重建（含 direct 关键字）——否则「设代理丢直连」（P0-6）。
+        let mut entries = pool.entries();
+        let norm = sanitize_proxy_url(&url);
+        if entries
             .iter()
-            .any(|u| duckai_upstream::sanitize_proxy_url(u) == norm)
+            .any(|e| !is_direct_entry(e) && sanitize_proxy_url(e) == norm)
         {
             return Err("代理已存在".to_string());
         }
-        urls.push(url);
-        pool.reconfigure(&urls)
+        entries.push(url.clone());
+        // 先落库（出口表 = 重启后池的真相），改池失败回滚行。
+        self.store
+            .upsert_egress(Some(&url))
+            .map_err(|e| e.to_string())?;
+        if let Err(e) = pool.reconfigure(&entries) {
+            let _ = self.store.delete_egress(Some(&url));
+            return Err(e);
+        }
+        Ok(())
     }
 
     fn remove_proxy(&self, url: String) -> Result<(), String> {
         let pool = self.pool_ref()?;
-        let mut urls = pool.proxy_urls();
-        let norm = duckai_upstream::sanitize_proxy_url(&url);
-        let before = urls.len();
-        urls.retain(|u| duckai_upstream::sanitize_proxy_url(u) != norm && *u != url);
-        if urls.len() == before {
+        let entries = pool.entries();
+        let norm = sanitize_proxy_url(&url);
+        let Some(pos) = entries
+            .iter()
+            .position(|e| !is_direct_entry(e) && sanitize_proxy_url(e) == norm)
+        else {
             return Err("代理不存在".to_string());
+        };
+        let target = entries[pos].clone();
+        let mut next = entries;
+        next.remove(pos);
+        // 落库先行；改池失败恢复该行（含原策略）。
+        let row = self
+            .store
+            .egresses()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|r| r.url.as_deref() == Some(target.as_str()));
+        self.store
+            .delete_egress(Some(&target))
+            .map_err(|e| e.to_string())?;
+        if self.store.egresses().map_err(|e| e.to_string())?.is_empty() {
+            // 出口表不能空：删除后仅剩直连语义（与池 reconfigure([]) 默认一致）。
+            self.store.upsert_egress(None).map_err(|e| e.to_string())?;
         }
-        pool.reconfigure(&urls)
+        if let Err(e) = pool.reconfigure(&next) {
+            if let Some(row) = row {
+                let id = self
+                    .store
+                    .upsert_egress(row.url.as_deref())
+                    .map_err(|e| e.to_string())?;
+                debug_assert_eq!(id, row.id);
+                let _ = self.store.set_egress_policy(
+                    row.url.as_deref(),
+                    row.cooldown_enabled,
+                    row.ban_secs,
+                    row.ban_cap_secs,
+                    row.rate_limit_secs,
+                );
+                let _ = self
+                    .store
+                    .set_egress_enabled(row.url.as_deref(), row.enabled);
+            }
+            return Err(e);
+        }
+        Ok(())
     }
 
     fn set_default_model(&self, model: String) -> Result<(), String> {
@@ -208,6 +275,135 @@ impl AdminControl for ServerAdmin {
         self.state.gate.set_max(n);
         Ok(())
     }
+
+    // ---- C2：出口策略 / 直连开关 / 密钥 CRUD / 设置 / 改口令 ----
+
+    fn set_egress_policy(&self, index: usize, policy: EgressPolicy) -> Result<(), String> {
+        policy.validate()?;
+        let pool = self.pool_ref()?;
+        let target = pool
+            .entries()
+            .get(index)
+            .cloned()
+            .ok_or_else(|| format!("出口 #{index} 不存在"))?;
+        let url = (!is_direct_entry(&target)).then_some(target.as_str());
+        // 先落库（行必须存在：行是池的引导来源），成功后改活策略。
+        self.store
+            .set_egress_policy(
+                url,
+                policy.cooldown_enabled,
+                policy.ban_secs,
+                policy.ban_cap_secs,
+                policy.rate_limit_secs,
+            )
+            .map_err(|e| e.to_string())?
+            .then_some(())
+            .ok_or_else(|| format!("出口 {target} 无配置行，无法保存策略"))?;
+        // 启用开关是策略的一部分，同样写穿。
+        self.store
+            .set_egress_enabled(url, policy.enabled)
+            .map_err(|e| e.to_string())?;
+        pool.set_policy(index, policy)
+    }
+
+    fn set_direct_egress(&self, enabled: bool) -> Result<(), String> {
+        let pool = self.pool_ref()?;
+        let entries = pool.entries();
+        let has = entries.iter().any(|e| is_direct_entry(e));
+        if enabled == has {
+            return Err(if enabled {
+                "直连出口已启用".to_string()
+            } else {
+                "直连出口不存在".to_string()
+            });
+        }
+        if !enabled && entries.len() == 1 {
+            return Err("至少保留一个出口".to_string());
+        }
+        if enabled {
+            self.store.upsert_egress(None).map_err(|e| e.to_string())?;
+            let mut next = entries;
+            next.push(DIRECT_ENTRY.to_string());
+            if let Err(e) = pool.reconfigure(&next) {
+                let _ = self.store.delete_egress(None);
+                return Err(e);
+            }
+        } else {
+            let removed = self
+                .store
+                .egresses()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|r| r.url.is_none());
+            self.store.delete_egress(None).map_err(|e| e.to_string())?;
+            let next: Vec<String> = entries
+                .into_iter()
+                .filter(|e| !is_direct_entry(e))
+                .collect();
+            if let Err(e) = pool.reconfigure(&next) {
+                if let Some(row) = removed {
+                    self.store.upsert_egress(None).map_err(|e| e.to_string())?;
+                    let _ = self.store.set_egress_policy(
+                        None,
+                        row.cooldown_enabled,
+                        row.ban_secs,
+                        row.ban_cap_secs,
+                        row.rate_limit_secs,
+                    );
+                    let _ = self.store.set_egress_enabled(None, row.enabled);
+                }
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    fn list_api_keys(&self) -> Vec<ApiKeyInfo> {
+        self.store.list_keys().unwrap_or_default()
+    }
+
+    fn create_api_key(&self, label: String) -> Result<String, String> {
+        self.store.create_key(&label).map_err(|e| e.to_string())
+    }
+
+    fn revoke_api_key(&self, id: i64) -> Result<bool, String> {
+        self.store.revoke_key(id).map_err(|e| e.to_string())
+    }
+
+    fn save_settings(
+        &self,
+        base: String,
+        vqd_override: String,
+        new_chat: bool,
+    ) -> Result<String, String> {
+        let b = base.trim().trim_end_matches('/').to_string();
+        if !(b.starts_with("http://") || b.starts_with("https://")) || b.len() <= "https://".len() {
+            return Err("BASE 必须是 http(s):// 上游地址".to_string());
+        }
+        let v = vqd_override.trim().to_string();
+        // 先落库（重启后从库回填），再更新展示值保持「读到的就是保存的」。
+        self.store
+            .set_setting("base", &b)
+            .map_err(|e| e.to_string())?;
+        self.store
+            .set_setting("vqd_override", &v)
+            .map_err(|e| e.to_string())?;
+        self.store
+            .set_setting("new_chat", if new_chat { "true" } else { "false" })
+            .map_err(|e| e.to_string())?;
+        *self.base.write().unwrap_or_else(|e| e.into_inner()) = b;
+        *self.vqd_override.write().unwrap_or_else(|e| e.into_inner()) =
+            (!v.is_empty()).then_some(v);
+        *self.new_chat.write().unwrap_or_else(|e| e.into_inner()) = new_chat;
+        Ok("设置已保存；BASE / VQD 覆盖需重启后由库回填生效".to_string())
+    }
+
+    fn change_admin_password(&self, old: String, new: String) -> Result<(), String> {
+        if self.password.available() && !self.password.verify(&old) {
+            return Err("旧口令不正确".to_string());
+        }
+        self.password.set_custom(&new)
+    }
 }
 
 /// 组装完成的应用：路由 + 监听地址（供 main 与集成测试共用）。
@@ -235,19 +431,39 @@ pub fn build(cfg: ServerConfig) -> Result<App, String> {
 /// 引导语义（「库为准」）：
 /// 1. `settings` 表为空 → 把 env 派生配置写入（一次性 bootstrap）；之后读库覆盖 env；
 /// 2. `api_keys` 表为空且 env 有 `DUCKAI_DEFAULT_API_KEY` → 导入第一把 key；
-/// 3. 非回环绑定 + 无任何活跃 key → 拒绝启动（fail-fast 移到库引导之后）。
+/// 3. `egress` 表为空 → 用 env 出口条目播种（关键字 `direct` → NULL 直连行）；
+///    之后池的条目与 per-egress 策略一律以库为准；
+/// 4. 非回环绑定 + 无任何活跃 key → 拒绝启动（fail-fast 移到库引导之后）。
 pub fn build_with_store(cfg: ServerConfig, store: Option<Arc<Store>>) -> Result<App, String> {
     let store = match store {
         Some(s) => s,
         None => Arc::new(Store::open(&cfg.db_path).map_err(|e| e.to_string())?),
     };
 
-    let cfg = bootstrap_settings(&store, cfg)?;
+    let mut cfg = bootstrap_settings(&store, cfg)?;
     if let Some(key) = cfg.default_api_key.as_deref() {
         store
             .import_default_key(key, "DUCKAI_DEFAULT_API_KEY 引导")
             .map_err(|e| e.to_string())?;
     }
+
+    // 出口表引导：空表播种 env 条目（库为准），随后整体回填池条目与策略。
+    let seed: Vec<Option<String>> = cfg
+        .proxies
+        .iter()
+        .map(|p| {
+            if is_direct_entry(p) {
+                None
+            } else {
+                Some(p.clone())
+            }
+        })
+        .collect();
+    store.seed_egresses(&seed).map_err(|e| e.to_string())?;
+    let rows = store.egresses().map_err(|e| e.to_string())?;
+    cfg.proxies = rows.iter().map(|r| entry_of(r.url.as_deref())).collect();
+    cfg.egress_policies = rows.iter().map(|r| r.policy()).collect();
+
     cfg.validate_bind(store.has_active_key())?;
 
     let password: Arc<dyn AdminPassword> = Arc::new(ServerPassword::new(
@@ -266,6 +482,8 @@ pub fn build_with_store(cfg: ServerConfig, store: Option<Arc<Store>>) -> Result<
         state.clone(),
         cfg.addr(),
         cfg.new_chat,
+        cfg.base.clone(),
+        cfg.vqd_override.clone(),
         password.clone(),
         store,
     );
@@ -527,5 +745,193 @@ mod tests {
         assert_eq!(h.status, "ok");
         assert_eq!(h.upstream.mode, "http");
         assert_eq!(h.egress.total, 1);
+    }
+
+    // ---- C2：出口配置化 / per-egress 策略 / 密钥与设置 ----
+
+    fn cfg_for_proxies(proxies: &str) -> ServerConfig {
+        ServerConfig::from_lookup(&|k: &str| match k {
+            "DUCKAI_PROXIES" => Some(proxies.to_string()),
+            "DUCKAI_DEFAULT_API_KEY" => Some("sk-e2e".to_string()),
+            "DUCKAI_DB_PATH" => Some(":memory:".to_string()),
+            _ => None,
+        })
+        .expect("test config")
+    }
+
+    /// env 出口引导 + 管理面增删不丢直连（P0-6 核心修复）。
+    #[test]
+    fn egress_seed_from_env_and_direct_survives_admin_edits() {
+        let app = build(cfg_for_proxies("socks5://b:1080, direct")).expect("build");
+        let admin = &app.admin;
+
+        let eg = admin.egresses();
+        assert_eq!(eg.len(), 2, "env 引导：代理 + 显式直连");
+        assert!(!eg[0].direct && eg[1].direct, "条目顺序与 env 一致");
+
+        admin.add_proxy("http://c:443".into()).expect("加代理");
+        let eg = admin.egresses();
+        assert_eq!(eg.len(), 3);
+        assert!(eg.iter().any(|e| e.direct), "加代理不丢直连");
+        assert_eq!(
+            admin.settings().proxies,
+            vec!["socks5://b:1080".to_string(), "http://c:443".to_string()],
+            "settings 只列代理（凭据已脱敏）"
+        );
+
+        admin
+            .remove_proxy("socks5://b:1080".into())
+            .expect("删代理");
+        assert!(
+            admin.egresses().iter().any(|e| e.direct),
+            "删代理后直连仍在"
+        );
+        assert_eq!(admin.settings().proxies, vec!["http://c:443".to_string()]);
+    }
+
+    /// 重启（同库）后：出口表是唯一引导来源，per-egress 策略持久。
+    #[tokio::test]
+    async fn egress_rows_and_policy_survive_restart() {
+        let store = Arc::new(Store::open_in_memory().expect("内存库"));
+        let app = build_with_store(cfg_for("https://duck.ai"), Some(store.clone())).expect("build");
+        app.admin.add_proxy("http://a:1".into()).expect("add");
+        let p = EgressPolicy {
+            ban_secs: 60,
+            ban_cap_secs: 300,
+            rate_limit_secs: 7,
+            cooldown_enabled: false,
+            ..EgressPolicy::default()
+        };
+        app.admin.set_egress_policy(1, p).expect("策略");
+        app.admin.set_direct_egress(false).expect("关直连");
+        drop(app);
+
+        let app2 = build_with_store(cfg_for("https://duck.ai"), Some(store.clone())).expect("重启");
+        let eg = app2.admin.egresses();
+        assert_eq!(eg.len(), 1, "直连行已删除 → 池只有代理");
+        assert!(!eg[0].direct);
+        assert_eq!(eg[0].ban_secs, 60, "策略从库回填");
+        assert_eq!(eg[0].ban_cap_secs, 300);
+        assert_eq!(eg[0].rate_limit_secs, 7);
+        assert!(!eg[0].cooldown_enabled);
+    }
+
+    /// 直连开关：增删直连行 + 活池同步，重复开关有明确错误。
+    #[test]
+    fn direct_egress_toggle_write_through() {
+        let app = build(cfg_for("https://duck.ai")).expect("build");
+        let admin = &app.admin;
+        assert!(
+            admin.set_direct_egress(false).is_err(),
+            "最后一个出口不能关"
+        );
+        admin.add_proxy("http://p:1".into()).expect("add");
+        admin.set_direct_egress(false).expect("关直连");
+        let eg = admin.egresses();
+        assert_eq!(eg.len(), 1);
+        assert!(!eg[0].direct);
+        assert!(admin.set_direct_egress(false).is_err(), "已关");
+        admin.set_direct_egress(true).expect("开直连");
+        assert!(admin.egresses().iter().any(|e| e.direct));
+        assert!(admin.set_direct_egress(true).is_err(), "已开");
+    }
+
+    /// 出口策略管理：写穿库 + 快照回读 + 校验拒绝。
+    #[test]
+    fn egress_policy_admin_write_through() {
+        let app = build(cfg_for("https://duck.ai")).expect("build");
+        let admin = &app.admin;
+        let p = EgressPolicy {
+            ban_secs: 42,
+            ban_cap_secs: 3600,
+            rate_limit_secs: 9,
+            cooldown_enabled: false,
+            ..EgressPolicy::default()
+        };
+        admin.set_egress_policy(0, p).expect("设策略");
+        let eg = admin.egresses();
+        assert_eq!(eg[0].ban_secs, 42);
+        assert_eq!(eg[0].ban_cap_secs, 3600);
+        assert_eq!(eg[0].rate_limit_secs, 9);
+        assert!(!eg[0].cooldown_enabled, "开关入快照");
+
+        let bad = EgressPolicy {
+            ban_secs: 0,
+            ..EgressPolicy::default()
+        };
+        assert!(
+            admin.set_egress_policy(0, bad).is_err(),
+            "ban_secs=0 拒绝（不落库）"
+        );
+        assert_eq!(admin.egresses()[0].ban_secs, 42, "失败不改库");
+        assert!(
+            admin.set_egress_policy(9, EgressPolicy::default()).is_err(),
+            "越界拒绝"
+        );
+    }
+
+    /// 密钥 CRUD（管理面 trait 方法）：前缀展示 + 吊销语义。
+    #[test]
+    fn api_key_crud_via_admin_control() {
+        let app = build(cfg_for("https://duck.ai")).expect("build");
+        let admin = &app.admin;
+
+        let keys = admin.list_api_keys();
+        assert_eq!(keys.len(), 1, "env 引导 key 在列");
+        assert!(keys[0].prefix.starts_with("sk-e2e"), "展示前缀");
+
+        let raw = admin.create_api_key("demo".into()).expect("建 key");
+        assert!(raw.starts_with("sk-") && raw.len() > 20, "一次性明文");
+        let keys = admin.list_api_keys();
+        assert_eq!(keys.len(), 2);
+        let id = keys.iter().find(|k| k.label == "demo").expect("在列").id;
+        assert!(admin.revoke_api_key(id).expect("吊销"));
+        assert!(
+            !admin.revoke_api_key(id).expect("重复吊销"),
+            "二次吊销 false"
+        );
+        assert_eq!(admin.list_api_keys().len(), 2, "吊销仍可见（历史）");
+    }
+
+    /// 设置保存与改口令：校验、写穿、口令切换后的旧口令失效。
+    #[test]
+    fn save_settings_and_change_admin_password() {
+        let app = build(cfg_for("https://duck.ai")).expect("build");
+        let admin = &app.admin;
+
+        assert!(
+            admin
+                .save_settings("ftp://bad".into(), String::new(), false)
+                .is_err(),
+            "非法 BASE 拒绝"
+        );
+        let note = admin
+            .save_settings("https://new.example/".into(), "vqd-x".into(), true)
+            .expect("保存");
+        assert!(note.contains("重启"), "如实告知生效时机：{note}");
+        let st = admin.settings();
+        assert_eq!(st.base, "https://new.example", "尾斜杠修剪");
+        assert_eq!(st.vqd_override.as_deref(), Some("vqd-x"));
+        assert!(st.new_chat);
+
+        // 无既有口令 → 旧口令栏为空直接设置
+        assert!(!admin.settings().admin_password_set);
+        admin
+            .change_admin_password(String::new(), "first-pass".into())
+            .expect("首设");
+        assert!(admin.settings().admin_password_set);
+        assert!(
+            admin
+                .change_admin_password(String::new(), "second-pass".into())
+                .is_err(),
+            "有口令后必须校验旧口令"
+        );
+        admin
+            .change_admin_password("first-pass".into(), "second-pass".into())
+            .expect("改口令");
+        assert!(
+            app.admin.settings().admin_password_set,
+            "口令切换后管理面仍可用"
+        );
     }
 }

@@ -10,16 +10,16 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::extract::{ConnectInfo, Query, Request, State};
+use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::{Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 
-use duckai_types::{AdminControl, AdminPassword};
+use duckai_types::{AdminControl, AdminPassword, EgressPolicy};
 
 const COOKIE_NAME: &str = "duckai_admin";
 const SESSION_TTL: Duration = Duration::from_secs(12 * 3600);
@@ -295,6 +295,112 @@ async fn trigger_probe(State(st): State<Arc<UiState>>) -> Response {
     (StatusCode::ACCEPTED, Json(json!({ "ok": true }))).into_response()
 }
 
+// ----------------------------------------------------------------- C2：密钥 / 出口策略 / 设置 / 口令
+
+/// `GET /keys`：密钥列表（只回显前缀，绝不回显明文）。
+async fn list_keys(State(st): State<Arc<UiState>>) -> Response {
+    Json(json!({ "keys": st.admin.list_api_keys() })).into_response()
+}
+
+#[derive(Deserialize)]
+struct CreateKeyBody {
+    label: Option<String>,
+}
+
+/// `POST /keys`：创建密钥；返回的一次性明文 `key` 仅此可见。
+async fn create_key(State(st): State<Arc<UiState>>, Json(body): Json<CreateKeyBody>) -> Response {
+    match st.admin.create_api_key(body.label.unwrap_or_default()) {
+        Ok(raw) => Json(json!({ "key": raw, "keys": st.admin.list_api_keys() })).into_response(),
+        Err(e) => err(StatusCode::BAD_REQUEST, &e),
+    }
+}
+
+/// `DELETE /keys/{id}`：吊销（重复吊销返回 404）。
+async fn revoke_key(State(st): State<Arc<UiState>>, Path(id): Path<i64>) -> Response {
+    match st.admin.revoke_api_key(id) {
+        Ok(true) => Json(json!({ "ok": true, "keys": st.admin.list_api_keys() })).into_response(),
+        Ok(false) => err(StatusCode::NOT_FOUND, "密钥不存在"),
+        Err(e) => err(StatusCode::BAD_REQUEST, &e),
+    }
+}
+
+#[derive(Deserialize)]
+struct PolicyBody {
+    index: usize,
+    /// 目标策略全量（含 enabled / cooldown_enabled / 三段时长）。
+    policy: EgressPolicy,
+}
+
+/// `POST /egress/policy`：按槽位写 per-egress 策略（先落库，再改活池）。
+async fn set_egress_policy(
+    State(st): State<Arc<UiState>>,
+    Json(body): Json<PolicyBody>,
+) -> Response {
+    match st.admin.set_egress_policy(body.index, body.policy) {
+        Ok(()) => Json(json!({ "ok": true, "egresses": st.admin.egresses() })).into_response(),
+        Err(e) => err(StatusCode::BAD_REQUEST, &e),
+    }
+}
+
+#[derive(Deserialize)]
+struct DirectBody {
+    enabled: bool,
+}
+
+/// `POST /egress/direct`：显式开关直连出口（增删 direct 行 + 活池同步）。
+async fn set_direct_egress(
+    State(st): State<Arc<UiState>>,
+    Json(body): Json<DirectBody>,
+) -> Response {
+    match st.admin.set_direct_egress(body.enabled) {
+        Ok(()) => Json(json!({ "ok": true, "egresses": st.admin.egresses() })).into_response(),
+        Err(e) => err(StatusCode::BAD_REQUEST, &e),
+    }
+}
+
+#[derive(Deserialize)]
+struct SaveSettingsBody {
+    base: String,
+    vqd_override: Option<String>,
+    new_chat: Option<bool>,
+}
+
+/// `POST /settings/save`：设置保存（写穿库；返回生效时机说明）。
+async fn save_settings(
+    State(st): State<Arc<UiState>>,
+    Json(body): Json<SaveSettingsBody>,
+) -> Response {
+    match st.admin.save_settings(
+        body.base,
+        body.vqd_override.unwrap_or_default(),
+        body.new_chat.unwrap_or(false),
+    ) {
+        Ok(note) => Json(json!({ "ok": true, "note": note, "settings": st.admin.settings() }))
+            .into_response(),
+        Err(e) => err(StatusCode::BAD_REQUEST, &e),
+    }
+}
+
+#[derive(Deserialize)]
+struct PasswordBody {
+    old: Option<String>,
+    new: String,
+}
+
+/// `POST /password`：改管理口令（旧口令校验 + 最短 8 位；改后会话仍有效）。
+async fn change_password(
+    State(st): State<Arc<UiState>>,
+    Json(body): Json<PasswordBody>,
+) -> Response {
+    match st
+        .admin
+        .change_admin_password(body.old.unwrap_or_default(), body.new)
+    {
+        Ok(()) => Json(json!({ "ok": true, "settings": st.admin.settings() })).into_response(),
+        Err(e) => err(StatusCode::BAD_REQUEST, &e),
+    }
+}
+
 // ----------------------------------------------------------------- 装配
 
 /// 路由声明（不含鉴权层）；`auth_guard` 由 `lib::router` 以真实状态挂载。
@@ -309,8 +415,14 @@ pub fn routes() -> Router<Arc<UiState>> {
         .route("/proxies", get(proxies))
         .route("/logs", get(logs))
         .route("/settings", post(update_settings))
+        .route("/settings/save", post(save_settings))
+        .route("/password", post(change_password))
+        .route("/keys", get(list_keys).post(create_key))
+        .route("/keys/{id}", delete(revoke_key))
         .route("/proxy", post(add_proxy).delete(remove_proxy))
         .route("/egress/ban", post(ban_egress))
         .route("/egress/unban", post(unban_egress))
+        .route("/egress/policy", post(set_egress_policy))
+        .route("/egress/direct", post(set_direct_egress))
         .route("/probe", post(trigger_probe))
 }
