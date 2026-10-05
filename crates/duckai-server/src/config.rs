@@ -1,16 +1,20 @@
 //! 配置装配：`.env` 文件 + 环境变量 → [`ServerConfig`]。
 //!
-//! `.env.example` 的 14 个键全部有消费点（见各字段文档）。优先级：
-//! 真实环境变量 > `.env` 文件 > 默认值。解析与校验是纯函数（[`ServerConfig::from_lookup`]），
-//! 测试注入查表闭包即可，不改进程环境。
+//! 密钥类（API key / 管理口令）已入库（sqlite，见 `duckai-store`）：env 只提供
+//! **默认/引导值**（`DUCKAI_DEFAULT_*`），库中已有数据时以库为准。
+//! 纯进程级的开关（bind/port/RUST_LOG 等）仍完全由 env 决定。
+//! 优先级：真实环境变量 > `.env` 文件 > 默认值。解析与校验是纯函数
+//! （[`ServerConfig::from_lookup`]），测试注入查表闭包即可，不改进程环境。
 
 use std::collections::HashMap;
 use std::net::IpAddr;
 
 use duckai_upstream::{UpstreamMode, parse_proxy_config};
 
-/// 非回环绑定必须带 API key 的失败提示（fail-fast，禁止裸奔上线）。
-const KEYLESS_BIND_MSG: &str = "启动拒绝：非回环绑定必须设置 DUCKAI_API_KEY（否则 /v1 无鉴权裸奔）";
+/// 非回环绑定必须有可用 API key 的失败提示（fail-fast，禁止裸奔上线）。
+/// 可用 key = 库内至少一把活跃 key，或引导用 `DUCKAI_DEFAULT_API_KEY`（装配层在库引导后校验）。
+const KEYLESS_BIND_MSG: &str = "启动拒绝：非回环绑定必须至少有一把可用 API key\
+     （库内密钥或 DUCKAI_DEFAULT_API_KEY，否则 /v1 无鉴权裸奔）";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServerConfig {
@@ -26,16 +30,20 @@ pub struct ServerConfig {
     pub new_chat: bool,
     /// `DUCKAI_PROXIES` + `DUCKAI_PROXY` 合并去重校验后的最终列表（空 = 直连）。
     pub proxies: Vec<String>,
-    /// `DUCKAI_API_KEY`（空 = 未启用；非回环绑定时触发 fail-fast）。
-    pub api_key: Option<String>,
+    /// 默认/引导 API key：`DUCKAI_DEFAULT_API_KEY`（兼容旧名 `DUCKAI_API_KEY`）。
+    /// 仅在库内 `api_keys` 表为空时作为第一把 key 导入；库非空后以库为准。
+    pub default_api_key: Option<String>,
     /// `DUCKAI_BIND`（默认 127.0.0.1）。
     pub bind: String,
     /// `PORT`（默认 8080）。
     pub port: u16,
-    /// `DUCKAI_MAX_CONCURRENCY`（默认 8，≥1）。
+    /// `DUCKAI_MAX_CONCURRENCY`（默认 8，≥1；首次启动引导入 settings 表）。
     pub max_concurrency: usize,
-    /// `DUCKAI_ADMIN_PASSWORD`（空 = WebUI 回环只读、写 403）。
-    pub admin_password: Option<String>,
+    /// 默认管理口令：`DUCKAI_DEFAULT_ADMIN_PASSWORD`（兼容旧名 `DUCKAI_ADMIN_PASSWORD`）。
+    /// 库内 `admin_password` 行存在时被遮蔽（救援 = 删行/删库）。
+    pub default_admin_password: Option<String>,
+    /// `DUCKAI_DB_PATH`（默认 `data/duckai.db`，0600；`:memory:` = 进程内不落盘）。
+    pub db_path: String,
     /// `DUCKAI_CHROME_PATH`（browser 模式可执行路径）。
     pub chrome_path: Option<String>,
     /// `RUST_LOG`（默认 info；main 交给 EnvFilter）。
@@ -85,7 +93,10 @@ impl ServerConfig {
         )
         .map_err(|e| format!("代理配置无效：{e}"))?;
 
-        let api_key = get("DUCKAI_API_KEY");
+        // 默认/引导密钥：新名优先，兼容旧名（旧名语义已降级为 bootstrap）。
+        let default_api_key = get("DUCKAI_DEFAULT_API_KEY").or_else(|| get("DUCKAI_API_KEY"));
+        let default_admin_password =
+            get("DUCKAI_DEFAULT_ADMIN_PASSWORD").or_else(|| get("DUCKAI_ADMIN_PASSWORD"));
 
         let bind = get("DUCKAI_BIND").unwrap_or_else(|| "127.0.0.1".to_string());
         let port = match get("PORT") {
@@ -108,14 +119,9 @@ impl ServerConfig {
             None => 8,
         };
 
-        let admin_password = get("DUCKAI_ADMIN_PASSWORD");
+        let db_path = get("DUCKAI_DB_PATH").unwrap_or_else(|| "data/duckai.db".to_string());
         let chrome_path = get("DUCKAI_CHROME_PATH");
         let log_filter = get("RUST_LOG").unwrap_or_else(|| "info".to_string());
-
-        // fail-fast：非回环绑定 + 无 API key → 拒绝启动。
-        if api_key.is_none() && !is_loopback(&bind) {
-            return Err(format!("{KEYLESS_BIND_MSG}（bind={bind}）"));
-        }
 
         Ok(Self {
             base,
@@ -124,14 +130,25 @@ impl ServerConfig {
             default_model,
             new_chat,
             proxies,
-            api_key,
+            default_api_key,
             bind,
             port,
             max_concurrency,
-            admin_password,
+            default_admin_password,
+            db_path,
             chrome_path,
             log_filter,
         })
+    }
+
+    /// fail-fast：非回环绑定必须至少有一把可用 API key。
+    /// 由 `build()` 在库引导之后调用（env 默认 key 此时可能已导入、库内也可能本就有 key）。
+    pub fn validate_bind(&self, auth_enabled: bool) -> Result<(), String> {
+        if auth_enabled || self.loopback() {
+            Ok(())
+        } else {
+            Err(format!("{KEYLESS_BIND_MSG}（bind={}）", self.bind))
+        }
     }
 
     /// 上游工厂配置（模式在此最终解析；factory 不读环境）。
@@ -228,11 +245,12 @@ mod tests {
         assert_eq!(cfg.default_model, "gpt-5.6-luna");
         assert!(!cfg.new_chat);
         assert!(cfg.proxies.is_empty(), "默认直连");
-        assert_eq!(cfg.api_key, None);
+        assert_eq!(cfg.default_api_key, None);
         assert_eq!(cfg.bind, "127.0.0.1");
         assert_eq!(cfg.port, 8080);
         assert_eq!(cfg.max_concurrency, 8);
-        assert_eq!(cfg.admin_password, None);
+        assert_eq!(cfg.default_admin_password, None);
+        assert_eq!(cfg.db_path, "data/duckai.db");
         assert_eq!(cfg.chrome_path, None);
         assert_eq!(cfg.log_filter, "info");
         assert!(cfg.loopback());
@@ -241,30 +259,59 @@ mod tests {
 
     #[test]
     fn fail_fast_non_loopback_without_key() {
-        let err = ServerConfig::from_lookup(&lookup(&[("DUCKAI_BIND", "0.0.0.0")]))
-            .expect_err("非回环无 key 必须拒绝");
-        assert!(err.contains("DUCKAI_API_KEY"), "错误要指名缺的键：{err}");
-        // 带上 key 即放行
+        // 解析阶段不再拒绝（库内可能已有 key）；build() 在库引导后调用 validate_bind。
+        let cfg =
+            ServerConfig::from_lookup(&lookup(&[("DUCKAI_BIND", "0.0.0.0")])).expect("解析不报错");
+        let err = cfg
+            .validate_bind(false)
+            .expect_err("非回环且无任何 key 必须拒绝");
+        assert!(
+            err.contains("DUCKAI_DEFAULT_API_KEY"),
+            "错误要指名引导键：{err}"
+        );
+        assert!(cfg.validate_bind(true).is_ok(), "有可用 key 即放行");
+        // 带默认 key 即导入后可用
         let ok = ServerConfig::from_lookup(&lookup(&[
             ("DUCKAI_BIND", "0.0.0.0"),
-            ("DUCKAI_API_KEY", "sk-live"),
+            ("DUCKAI_DEFAULT_API_KEY", "sk-live"),
         ]))
         .expect("带 key 可启动");
         assert!(!ok.loopback());
-        assert_eq!(ok.api_key.as_deref(), Some("sk-live"));
+        assert_eq!(ok.default_api_key.as_deref(), Some("sk-live"));
+        // 旧名兼容
+        let legacy = ServerConfig::from_lookup(&lookup(&[
+            ("DUCKAI_API_KEY", "sk-old"),
+            ("DUCKAI_ADMIN_PASSWORD", "pw-old"),
+        ]))
+        .expect("旧名可解析");
+        assert_eq!(legacy.default_api_key.as_deref(), Some("sk-old"));
+        assert_eq!(legacy.default_admin_password.as_deref(), Some("pw-old"));
+        // 新名优先
+        let newer = ServerConfig::from_lookup(&lookup(&[
+            ("DUCKAI_DEFAULT_API_KEY", "sk-new"),
+            ("DUCKAI_API_KEY", "sk-old"),
+        ]))
+        .expect("新名可解析");
+        assert_eq!(newer.default_api_key.as_deref(), Some("sk-new"));
     }
 
     #[test]
     fn localhost_counts_as_loopback_but_unknown_host_does_not() {
+        let cfg = ServerConfig::from_lookup(&lookup(&[("DUCKAI_BIND", "localhost")]))
+            .expect("localhost 解析成功");
+        assert!(cfg.loopback(), "localhost 视为回环");
+        assert!(cfg.validate_bind(false).is_ok(), "回环无 key 也放行");
+
+        let host = ServerConfig::from_lookup(&lookup(&[("DUCKAI_BIND", "myhost")]))
+            .expect("无法判定的主机名不拒解析");
         assert!(
-            ServerConfig::from_lookup(&lookup(&[("DUCKAI_BIND", "localhost")])).is_ok(),
-            "localhost 视为回环"
-        );
-        assert!(
-            ServerConfig::from_lookup(&lookup(&[("DUCKAI_BIND", "myhost")])).is_err(),
+            host.validate_bind(false).is_err(),
             "无法判定的主机名从严要求 key"
         );
-        assert!(ServerConfig::from_lookup(&lookup(&[("DUCKAI_BIND", "::1")])).is_ok());
+
+        let v6 = ServerConfig::from_lookup(&lookup(&[("DUCKAI_BIND", "::1")])).expect("解析");
+        assert!(v6.loopback());
+        assert!(v6.validate_bind(false).is_ok());
     }
 
     #[test]
@@ -312,16 +359,18 @@ mod tests {
     fn empty_values_treated_as_unset() {
         // .env.example 默认就是这些空值行：空 = 未设置（不是 Some("")）。
         let cfg = ServerConfig::from_lookup(&lookup(&[
-            ("DUCKAI_API_KEY", ""),
+            ("DUCKAI_DEFAULT_API_KEY", ""),
+            ("DUCKAI_DEFAULT_ADMIN_PASSWORD", ""),
             ("DUCKAI_VQD_OVERRIDE", ""),
-            ("DUCKAI_ADMIN_PASSWORD", ""),
             ("DUCKAI_CHROME_PATH", ""),
+            ("DUCKAI_DB_PATH", ""),
         ]))
         .expect("空值不报错");
-        assert_eq!(cfg.api_key, None);
+        assert_eq!(cfg.default_api_key, None);
         assert_eq!(cfg.vqd_override, None);
-        assert_eq!(cfg.admin_password, None);
+        assert_eq!(cfg.default_admin_password, None);
         assert_eq!(cfg.chrome_path, None);
+        assert_eq!(cfg.db_path, "data/duckai.db", "空值回落默认路径");
     }
 
     #[test]

@@ -1,8 +1,9 @@
 //! 管理 API：cookie 会话鉴权 + AdminState/AdminControl 的 HTTP 暴露。
 //!
-//! 权限模型（`.env.example` `DUCKAI_ADMIN_PASSWORD` 消费点）：
-//! - 非空：读写均需 `duckai_admin` 会话 cookie（POST /login 换取，12h 有效）；
-//! - 为空：WebUI 只读，且仅回环来源可访问；一切写操作恒 403。
+//! 权限模型（口令来源由装配层注入的 `AdminPassword` trait 决定）：
+//! - 已配置口令（库内自定义或 `DUCKAI_DEFAULT_ADMIN_PASSWORD`）：读写均需
+//!   `duckai_admin` 会话 cookie（POST /login 换取，12h 有效）；
+//! - 未配置任何口令：WebUI 只读，且仅回环来源可访问；一切写操作恒 403。
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -18,7 +19,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 
-use duckai_types::AdminControl;
+use duckai_types::{AdminControl, AdminPassword};
 
 const COOKIE_NAME: &str = "duckai_admin";
 const SESSION_TTL: Duration = Duration::from_secs(12 * 3600);
@@ -26,22 +27,23 @@ const SESSION_TTL: Duration = Duration::from_secs(12 * 3600);
 /// WebUI 全局状态（与 `AdminControl` 组合；trait 本体实现在 duckai-server）。
 pub struct UiState {
     pub admin: Arc<dyn AdminControl>,
-    password: Option<String>,
+    /// 口令契约（库内 argon2id 自定义口令 / env 默认口令回落，实现在装配层）。
+    password: Arc<dyn AdminPassword>,
     sessions: Mutex<HashMap<String, Instant>>,
 }
 
 impl UiState {
-    pub fn new(admin: Arc<dyn AdminControl>, password: Option<String>) -> Self {
+    pub fn new(admin: Arc<dyn AdminControl>, password: Arc<dyn AdminPassword>) -> Self {
         Self {
             admin,
-            password: password.filter(|p| !p.is_empty()),
+            password,
             sessions: Mutex::new(HashMap::new()),
         }
     }
 
     /// 无口令 = 只读模式。
     pub fn read_only(&self) -> bool {
-        self.password.is_none()
+        !self.password.available()
     }
 
     fn issue_token(&self) -> String {
@@ -91,18 +93,6 @@ impl UiState {
     }
 }
 
-/// 常量时间口令比较（长度+逐字节 XOR）。
-fn password_matches(expected: &str, given: &str) -> bool {
-    if expected.len() != given.len() {
-        return false;
-    }
-    expected
-        .bytes()
-        .zip(given.bytes())
-        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-        == 0
-}
-
 fn err(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
 }
@@ -128,29 +118,26 @@ pub(crate) async fn auth_guard(
         .map(|c| c.0.ip());
     let loopback_ok = remote.is_none_or(is_loopback);
 
-    match st.password.clone() {
-        Some(_) => {
-            // 有口令：读写都要求有效会话。
-            let ok = UiState::token_from(&req).is_some_and(|t| st.session_valid(&t));
-            if !ok {
-                return err(StatusCode::UNAUTHORIZED, "未登录或会话已过期");
-            }
+    if st.read_only() {
+        // 无口令：仅回环可访问；写操作恒 403。
+        if !loopback_ok {
+            return err(
+                StatusCode::FORBIDDEN,
+                "未配置管理口令（库内或 DUCKAI_DEFAULT_ADMIN_PASSWORD），管理面仅限本机访问",
+            );
         }
-        None => {
-            // 无口令：仅回环可访问；写操作恒 403。
-            if !loopback_ok {
-                return err(
-                    StatusCode::FORBIDDEN,
-                    "未设置 DUCKAI_ADMIN_PASSWORD，管理面仅限本机访问",
-                );
-            }
-            let is_write = !matches!(req.method(), &Method::GET | &Method::HEAD);
-            if is_write {
-                return err(
-                    StatusCode::FORBIDDEN,
-                    "只读模式：未设置 DUCKAI_ADMIN_PASSWORD，写操作被拒绝",
-                );
-            }
+        let is_write = !matches!(req.method(), &Method::GET | &Method::HEAD);
+        if is_write {
+            return err(
+                StatusCode::FORBIDDEN,
+                "只读模式：未配置管理口令，写操作被拒绝",
+            );
+        }
+    } else {
+        // 有口令：读写都要求有效会话。
+        let ok = UiState::token_from(&req).is_some_and(|t| st.session_valid(&t));
+        if !ok {
+            return err(StatusCode::UNAUTHORIZED, "未登录或会话已过期");
         }
     }
     next.run(req).await
@@ -164,10 +151,10 @@ struct LoginBody {
 }
 
 async fn login(State(st): State<Arc<UiState>>, Json(body): Json<LoginBody>) -> Response {
-    let Some(expected) = st.password.clone() else {
-        return err(StatusCode::FORBIDDEN, "未设置管理口令，无需登录");
-    };
-    if !password_matches(&expected, &body.password) {
+    if !st.password.available() {
+        return err(StatusCode::FORBIDDEN, "未配置管理口令，无需登录");
+    }
+    if !st.password.verify(&body.password) {
         return err(StatusCode::UNAUTHORIZED, "口令不正确");
     }
     let token = st.issue_token();

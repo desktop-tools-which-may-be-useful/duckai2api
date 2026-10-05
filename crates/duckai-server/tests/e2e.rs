@@ -15,11 +15,12 @@ const MODELS_JSON: &str = include_str!("../../../fixtures/models.json");
 const SSE_SUCCESS: &str = include_str!("../../../fixtures/sse_success.txt");
 const CHALLENGE_B64: &str = include_str!("../../../fixtures/challenge_fresh.b64");
 
-/// 装配测试配置：回环 + API key（14 键只注需要的，其余走默认）。
+/// 装配测试配置：回环 + 默认 API key + 内存库（不落盘、不进 git）。
 fn cfg_for(base: &str, extra: &[(&str, &str)]) -> ServerConfig {
     ServerConfig::from_lookup(&move |k: &str| match k {
         "DUCKAI_BASE" => Some(base.to_string()),
-        "DUCKAI_API_KEY" => Some("sk-test-key".to_string()),
+        "DUCKAI_DEFAULT_API_KEY" => Some("sk-test-key".to_string()),
+        "DUCKAI_DB_PATH" => Some(":memory:".to_string()),
         _ => extra
             .iter()
             .find(|(ek, _)| *ek == k)

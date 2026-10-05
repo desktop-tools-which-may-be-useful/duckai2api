@@ -1,7 +1,7 @@
 //! WebUI 层：恰好两份静态资源（无构建链）+ 管理 API。
 //!
-//! 分层约束：本 crate 只依赖 `duckai-types` 的 `AdminControl` trait，
-//! 不感知 API 层与协议层的任何内部类型。
+//! 分层约束：本 crate 只依赖 `duckai-types` 的 `AdminControl` / `AdminPassword` 契约，
+//! 不感知 API 层、协议层与存储层的任何内部类型。
 
 mod admin_api;
 mod assets;
@@ -18,9 +18,9 @@ pub use admin_api::UiState;
 /// - `/admin/api/*` → 管理 API（cookie 会话；无口令时回环只读、写恒 403）
 pub fn router(
     admin: Arc<dyn duckai_types::AdminControl>,
-    admin_password: Option<String>,
+    password: Arc<dyn duckai_types::AdminPassword>,
 ) -> Router {
-    let state = Arc::new(UiState::new(admin, admin_password));
+    let state = Arc::new(UiState::new(admin, password));
     let admin_routes = admin_api::routes().layer(middleware::from_fn_with_state(
         state.clone(),
         admin_api::auth_guard,

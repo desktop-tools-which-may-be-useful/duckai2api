@@ -17,6 +17,7 @@ duckai-types = { workspace = true }
 duckai-protocol = { workspace = true }
 duckai-upstream = { workspace = true, default-features = false }
 duckai-api = { workspace = true }
+duckai-store = { workspace = true }
 duckai-webui = { workspace = true, optional = true }
 tokio = { workspace = true }
 axum = { workspace = true }

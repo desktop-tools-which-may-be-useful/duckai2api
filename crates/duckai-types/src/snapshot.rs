@@ -68,6 +68,26 @@ pub struct LogEntry {
     pub error: Option<String>,
 }
 
+/// 库内 API 密钥元数据（展示用；绝不含明文与完整哈希）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyInfo {
+    pub id: i64,
+    /// 人工标签（如「网关 A」）。
+    pub label: String,
+    /// 展示前缀（如 `sk-Vk9…` 前 12 字符），用于对账。
+    pub prefix: String,
+    /// 创建时间（epoch 秒）。
+    pub created_at: i64,
+    /// 吊销时间（epoch 秒）；`None` = 活跃。
+    pub revoked_at: Option<i64>,
+}
+
+impl ApiKeyInfo {
+    pub fn active(&self) -> bool {
+        self.revoked_at.is_none()
+    }
+}
+
 /// 只读状态视图（Settings 页 + Dashboard 数据源）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingsSnapshot {

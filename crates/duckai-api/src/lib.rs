@@ -39,8 +39,8 @@ pub use crate::stream::{TextGate, completion_id, hex24};
 pub struct ApiState {
     /// 上游接入（http/browser/testutil 适配器同一 trait）。
     pub upstream: Arc<dyn UpstreamClient>,
-    /// `DUCKAI_API_KEY`；`None` = 关闭鉴权（仅回环地址允许，由 server 启动期强制）。
-    pub api_key: Option<String>,
+    /// Bearer key 校验（装配层注入：静态默认 key / 库内多把密钥）。
+    pub auth: Arc<dyn duckai_types::ApiKeyAuth>,
     pub gate: Arc<ConcurrencyGate>,
     /// `DUCKAI_MODEL`：请求缺省模型。
     /// 默认模型：`DUCKAI_MODEL`，管理面 `set_default_model` 运行时可改
@@ -51,15 +51,31 @@ pub struct ApiState {
 }
 
 impl ApiState {
+    /// 静态 key 装配（测试/遗留路径）：`None`/空 = 关闭鉴权。
     pub fn new(
         upstream: Arc<dyn UpstreamClient>,
         api_key: Option<String>,
         default_model: String,
         max_concurrency: usize,
     ) -> Self {
+        Self::with_auth(
+            upstream,
+            Arc::new(StaticKeyAuth::new(api_key)),
+            default_model,
+            max_concurrency,
+        )
+    }
+
+    /// 装配层注入任意 [`ApiKeyAuth`]（生产走 sqlite 库内密钥）。
+    pub fn with_auth(
+        upstream: Arc<dyn UpstreamClient>,
+        auth: Arc<dyn duckai_types::ApiKeyAuth>,
+        default_model: String,
+        max_concurrency: usize,
+    ) -> Self {
         Self {
             upstream,
-            api_key,
+            auth,
             gate: Arc::new(ConcurrencyGate::new(max_concurrency)),
             default_model: std::sync::Arc::new(std::sync::RwLock::new(default_model)),
             logs: Arc::new(LogRing::default()),
@@ -72,6 +88,31 @@ impl ApiState {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+}
+
+/// 单把静态 key（env 默认 key / 测试）：常数时间比较。
+pub struct StaticKeyAuth {
+    key: Option<String>,
+}
+
+impl StaticKeyAuth {
+    pub fn new(key: Option<String>) -> Self {
+        Self {
+            key: key.filter(|k| !k.is_empty()),
+        }
+    }
+}
+
+impl duckai_types::ApiKeyAuth for StaticKeyAuth {
+    fn enabled(&self) -> bool {
+        self.key.is_some()
+    }
+
+    fn validate(&self, presented: &str) -> bool {
+        self.key
+            .as_deref()
+            .is_some_and(|expected| bearer_matches(expected, presented))
     }
 }
 
@@ -90,15 +131,15 @@ fn bearer_matches(expected: &str, presented: &str) -> bool {
 
 /// `/v1/*` Bearer 鉴权中间件：401 错误帧按路径分族（`/v1/messages` 用 Anthropic 形状）。
 pub async fn auth_middleware(State(state): State<ApiState>, req: Request, next: Next) -> Response {
-    let Some(expected) = state.api_key.as_deref().filter(|k| !k.is_empty()) else {
+    if !state.auth.enabled() {
         return next.run(req).await;
-    };
+    }
     let presented = req
         .headers()
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer ").map(str::trim));
-    let ok = presented.is_some_and(|token| bearer_matches(expected, token));
+    let ok = presented.is_some_and(|token| state.auth.validate(token));
     if ok {
         return next.run(req).await;
     }

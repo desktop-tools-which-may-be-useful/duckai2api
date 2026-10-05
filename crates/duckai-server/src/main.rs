@@ -1,6 +1,7 @@
-//! duckai2api 可执行入口：读配置 → 装配 → 监听 → 优雅退出。
+//! duckai2api 可执行入口：读配置 → 打开 sqlite 库并装配 → 监听 → 优雅退出。
 //!
-//! 任何配置错误（含非回环绑定缺 API key 的 fail-fast）在此打印后退出码 1。
+//! 任何启动失败（含配置解析错误、库引导失败、非回环绑定缺 key 的 fail-fast）
+//! 在此打印后退出码 1。
 
 use std::net::SocketAddr;
 
@@ -12,7 +13,7 @@ async fn main() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("配置错误：{e}");
-            eprintln!("（参考 .env.example 的 14 个键；.env 与环境变量同时存在时环境变量优先）");
+            eprintln!("（参考 .env.example；.env 与环境变量同时存在时环境变量优先）");
             std::process::exit(1);
         }
     };

@@ -6,6 +6,7 @@ members = [
     "crates/duckai-upstream",
     "crates/duckai-api",
     "crates/duckai-webui",
+    "crates/duckai-store",
     "crates/duckai-server",
 ]
 
@@ -24,6 +25,7 @@ duckai-protocol = { path = "crates/duckai-protocol" }
 duckai-upstream = { path = "crates/duckai-upstream", default-features = false }
 duckai-api = { path = "crates/duckai-api" }
 duckai-webui = { path = "crates/duckai-webui" }
+duckai-store = { path = "crates/duckai-store" }
 
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "net", "time", "sync", "signal", "io-util"] }
 axum = { version = "0.8", features = ["json"] }
@@ -45,6 +47,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 thiserror = "2"
 regex = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+argon2 = "0.5"
 bytes = "1"
 http = "1"
 tower = { version = "0.5", features = ["util"] }
